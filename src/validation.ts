@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+
 import { minimatch } from "minimatch";
 
 import type { CommandRunner } from "./shell.js";
@@ -44,6 +47,32 @@ export async function runValidationCommands(
     command: string;
     status: "passed" | "failed" | "skipped";
   }> = [];
+
+  const isNodeInstallSkipped =
+    process.env.ISSUE_ENGINE_SKIP_NODE_INSTALL?.toLowerCase().trim() === "true";
+  const lockfilePath = join(worktreePath, "package-lock.json");
+  const markerPath = join(worktreePath, "node_modules", ".package-lock.json");
+  const hasLockfile = existsSync(lockfilePath);
+  const hasDependencyMarker = existsSync(markerPath);
+
+  if (!dryRun && commands.length > 0) {
+    if (isNodeInstallSkipped) {
+      logger.info(
+        "Dependency bootstrap skipped: ISSUE_ENGINE_SKIP_NODE_INSTALL=true",
+      );
+    } else if (hasLockfile && !hasDependencyMarker) {
+      logger.info(`Running npm ci in ${worktreePath} before validation commands`);
+      await runner.run("sh", ["-lc", "npm ci"], { cwd: worktreePath });
+    } else if (hasLockfile && hasDependencyMarker) {
+      logger.info(
+        "Dependency bootstrap skipped: node_modules/.package-lock.json is present",
+      );
+    } else {
+      logger.info(
+        "Dependency bootstrap skipped: no package-lock.json at worktree root",
+      );
+    }
+  }
 
   for (const command of commands) {
     if (dryRun) {

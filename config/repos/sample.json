@@ -1,6 +1,6 @@
 {
   "profileName": "sample",
-  "description": "Demonstration profile. Copy and edit for a real repository.",
+  "description": "Demonstration profile. Copy and edit for a real repository. Dependency installation is handled by Issue-Engine (npm ci when package-lock.json exists and node_modules/.package-lock.json is missing).",
   "github": {
     "owner": "example-owner",
     "repo": "example-repo"
