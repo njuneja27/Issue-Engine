@@ -47,6 +47,7 @@ export interface RunIssueOptions {
   runner: CommandRunner;
   codex: CodexClient;
   issue: GitHubIssue;
+  issues?: GitHubIssue[] | undefined;
   dryRun: boolean;
   runId?: string | undefined;
   runOwner?: string | undefined;
@@ -55,8 +56,9 @@ export interface RunIssueOptions {
 
 export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   const { profile, appConfig, db, logger, runner, codex, dryRun } = options;
-  const issue = selectIssue(db, profile, options.issueNumber);
-  const runId = randomId(`run-${options.profile.profileName}-issue-${issue.number}`);
+  const issues = await syncOpenIssues(runner, db, profile, logger);
+  const issue = selectIssue(db, profile, options.issueNumber, issues);
+  const owner = `issue-engine:${process.pid}`;
 
   return runIssue({
     profile,
@@ -65,11 +67,10 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
     logger,
     runner,
     codex,
+    issues,
     dryRun,
-    runOwner,
-    runId,
     issue,
-    runOwner: runOwner ?? `issue-engine:${process.pid}`,
+    runOwner: owner,
     requireIssueReady: true,
   });
 }
@@ -83,6 +84,7 @@ export async function runIssue(options: RunIssueOptions): Promise<RunOnceResult>
     runner,
     codex,
     issue,
+    issues: syncedIssues,
     dryRun,
     runId,
     runOwner,
@@ -90,6 +92,7 @@ export async function runIssue(options: RunIssueOptions): Promise<RunOnceResult>
   } = options;
   const effectiveRunId = runId ?? randomId(`run-${profile.profileName}-issue-${issue.number}`);
   const owner = runOwner ?? `issue-engine:${process.pid}`;
+  const allowBypassApprovalsAndSandbox = profile.codex?.allowBypassApprovalsAndSandbox === true;
   const runLabel = `[run ${effectiveRunId}]`;
 
   if (!dryRun) {
@@ -100,9 +103,13 @@ export async function runIssue(options: RunIssueOptions): Promise<RunOnceResult>
     `${runLabel} starting ${dryRun ? "dry-run" : "real"} run for issue #${issue.number} in profile ${profile.profileName} (owner=${owner})`,
   );
 
-  logger.info(`${runLabel} syncing open issues`);
-  const issues = await syncOpenIssues(runner, db, profile, logger);
-  logger.info(`${runLabel} synced ${issues.length} open issues`);
+  const issues = syncedIssues ?? await syncOpenIssues(runner, db, profile, logger);
+  if (syncedIssues) {
+    logger.debug(`${runLabel} using preloaded open issues (${issues.length})`);
+  } else {
+    logger.info(`${runLabel} syncing open issues`);
+    logger.info(`${runLabel} synced ${issues.length} open issues`);
+  }
   logger.info(`${runLabel} rebuilding issue graph`);
   const edges = await buildIssueGraph(
     profile,
@@ -160,6 +167,8 @@ export async function runIssue(options: RunIssueOptions): Promise<RunOnceResult>
       dryRun,
       startedAt: nowIso(),
       metadata: {
+        codexBypassApprovalsAndSandbox: allowBypassApprovalsAndSandbox,
+        codexBypassApprovalsAndSandboxConfigured: profile.codex !== undefined,
         runOwner: owner,
       },
     };
@@ -201,6 +210,8 @@ export async function runIssue(options: RunIssueOptions): Promise<RunOnceResult>
     db.updateRun(effectiveRunId, {
       phase: "review",
       metadata: {
+        codexBypassApprovalsAndSandbox: allowBypassApprovalsAndSandbox,
+        codexBypassApprovalsAndSandboxConfigured: profile.codex !== undefined,
         plannerModel: planner.modelUsed,
         promptPath: planner.promptPath,
         plannerResponsePath: planner.responsePath,
@@ -227,6 +238,8 @@ export async function runIssue(options: RunIssueOptions): Promise<RunOnceResult>
     db.updateRun(effectiveRunId, {
       phase: "implementation",
       metadata: {
+        codexBypassApprovalsAndSandbox: allowBypassApprovalsAndSandbox,
+        codexBypassApprovalsAndSandboxConfigured: profile.codex !== undefined,
         plannerModel: planner.modelUsed,
         reviewerModel: reviewer.modelUsed,
         reviewerResponsePath: reviewer.responsePath,
@@ -307,6 +320,8 @@ export async function runIssue(options: RunIssueOptions): Promise<RunOnceResult>
       status: "succeeded",
       endedAt: nowIso(),
       metadata: {
+        codexBypassApprovalsAndSandbox: allowBypassApprovalsAndSandbox,
+        codexBypassApprovalsAndSandboxConfigured: profile.codex !== undefined,
         plannerModel: planner.modelUsed,
         reviewerModel: reviewer.modelUsed,
         implementerModel: implementer.modelUsed,

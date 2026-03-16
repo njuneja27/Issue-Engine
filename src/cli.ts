@@ -10,6 +10,7 @@ import { buildIssueGraph } from "./issue-graph.js";
 import { createLogger } from "./logging.js";
 import { createLockManager } from "./locks.js";
 import { runOnce } from "./pipeline.js";
+import { commandToString } from "./command-config.js";
 import { NodeCommandRunner } from "./shell.js";
 import { listReadyIssues, nextReadyIssue } from "./scheduler.js";
 import { watchPullRequests } from "./watchers.js";
@@ -51,7 +52,9 @@ program
       console.log(`Profiles: ${profiles.join(", ") || "(none)"}`);
       console.log(
         `Capacity gate: ${
-          appConfig.capacityCheck?.enabled ? appConfig.capacityCheck.command : "(disabled)"
+          appConfig.capacityCheck?.enabled
+            ? commandToString(appConfig.capacityCheck.command)
+            : "(disabled)"
         }`,
       );
     } finally {

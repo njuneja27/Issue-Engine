@@ -1,3 +1,5 @@
+import type { CommandInput } from "./command-config.js";
+
 export type RunPhase =
   | "planning"
   | "review"
@@ -29,7 +31,7 @@ export interface ModelPolicy {
 
 export interface ValidationCommand {
   name: string;
-  command: string;
+  command: CommandInput;
   optional?: boolean | undefined;
 }
 
@@ -66,6 +68,9 @@ export interface RepoProfile {
   defaultBranch: string;
   concurrency: number;
   allowMetaIssues?: boolean | undefined;
+  codex?: {
+    allowBypassApprovalsAndSandbox?: boolean | undefined;
+  } | undefined;
   branchNameTemplate: string;
   prTemplates: {
     title: string;
