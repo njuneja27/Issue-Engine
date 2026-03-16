@@ -40,6 +40,7 @@ export class CodexClient {
     runDir: string,
     cwd: string,
     dryRun: boolean,
+    runLabel?: string,
   ): Promise<StructuredCodexRun<PlannerOutput>> {
     return this.runStructured<PlannerOutput>({
       phase: "planning",
@@ -60,6 +61,7 @@ export class CodexClient {
         validationPlan: ["Run base validation commands from the repo profile."],
         risks: ["Plan not executed because dry-run mode is enabled."],
       },
+      runLabel,
     });
   }
 
@@ -69,6 +71,7 @@ export class CodexClient {
     runDir: string,
     cwd: string,
     dryRun: boolean,
+    runLabel?: string,
   ): Promise<StructuredCodexRun<ReviewerOutput>> {
     return this.runStructured<ReviewerOutput>({
       phase: "review",
@@ -85,6 +88,7 @@ export class CodexClient {
         requiredChanges: [],
         validationGaps: [],
       },
+      runLabel,
     });
   }
 
@@ -94,6 +98,7 @@ export class CodexClient {
     runDir: string,
     cwd: string,
     dryRun: boolean,
+    runLabel?: string,
   ): Promise<StructuredCodexRun<ImplementationOutput>> {
     return this.runStructured<ImplementationOutput>({
       phase: "implementation",
@@ -110,6 +115,7 @@ export class CodexClient {
         validationCommands: [],
         followUps: [],
       },
+      runLabel,
     });
   }
 
@@ -188,13 +194,28 @@ export class CodexClient {
     dryRun: boolean;
     dryRunOutput: T;
     policyOverride?: ModelPolicy;
+    runLabel?: string;
+    feedbackMode?: "normal" | "verbose";
   }): Promise<StructuredCodexRun<T>> {
     const promptPath = join(options.runDir, `${options.phase}.prompt.md`);
     const responsePath = join(options.runDir, `${options.phase}.response.json`);
     writeTextFile(promptPath, normalizeNewlines(options.prompt));
     const phaseTag = `codex-${options.phase}`;
-    const stdoutLogger = createPrefixedStreamLogger(this.logger, phaseTag, "stdout");
-    const stderrLogger = createPrefixedStreamLogger(this.logger, phaseTag, "stderr");
+    const feedbackMode = options.feedbackMode ?? getFeedbackMode();
+    const stdoutLogger = createPrefixedStreamLogger(
+      this.logger,
+      phaseTag,
+      "stdout",
+      options.runLabel,
+      feedbackMode,
+    );
+    const stderrLogger = createPrefixedStreamLogger(
+      this.logger,
+      phaseTag,
+      "stderr",
+      options.runLabel,
+      feedbackMode,
+    );
 
     if (options.dryRun) {
       writeTextFile(responsePath, formatJson(options.dryRunOutput));
@@ -295,8 +316,26 @@ function createPrefixedStreamLogger(
   logger: Logger,
   phaseTag: string,
   stream: "stdout" | "stderr",
+  runLabel: string | undefined,
+  feedbackMode: "normal" | "verbose",
 ): { write: (chunk: string) => void; flush: () => void } {
   let buffer = "";
+  const compactMode = feedbackMode !== "verbose";
+  const phaseLabel = phaseTag;
+  const prefix = `${runLabel ?? "[run]"} ${phaseLabel}`;
+
+  const formatLine = (line: string): string => {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      return "";
+    }
+
+    if (stream === "stderr") {
+      return `${prefix}${compactMode ? ": " : " stderr: "} ${trimmed}`;
+    }
+
+    return `${prefix}${compactMode ? ": " : " out: "} ${trimmed}`;
+  };
 
   const write = (chunk: string): void => {
     if (!chunk) {
@@ -308,25 +347,29 @@ function createPrefixedStreamLogger(
     buffer = lines.pop() ?? "";
 
     for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) {
+      const formatted = formatLine(line);
+      if (!formatted) {
         continue;
       }
       if (stream === "stderr") {
-        logger.warn(`${phaseTag} stderr: ${trimmed}`);
+        logger.warn(formatted);
       } else {
-        logger.info(`${phaseTag} stdout: ${trimmed}`);
+        logger.info(formatted);
       }
     }
   };
 
   const flush = (): void => {
-    if (buffer.trim()) {
-      if (stream === "stderr") {
-        logger.warn(`${phaseTag} stderr: ${buffer.trim()}`);
-      } else {
-        logger.info(`${phaseTag} stdout: ${buffer.trim()}`);
-      }
+    const formatted = formatLine(buffer);
+    if (!formatted) {
+      buffer = "";
+      return;
+    }
+
+    if (stream === "stderr") {
+      logger.warn(formatted);
+    } else {
+      logger.info(formatted);
     }
     buffer = "";
   };
@@ -343,6 +386,15 @@ function looksLikeModelAvailabilityError(error: unknown): boolean {
         : String(error);
 
   return /model|unavailable|unknown|not found|unsupported/i.test(message);
+}
+
+function getFeedbackMode(): "normal" | "verbose" {
+  const raw = process.env.ISSUE_ENGINE_FEEDBACK_MODE?.trim().toLowerCase();
+  if (raw === "verbose") {
+    return "verbose";
+  }
+
+  return "normal";
 }
 
 function uniqueStrings(values: string[]): string[] {
