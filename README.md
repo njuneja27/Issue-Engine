@@ -116,6 +116,8 @@ This is generic on purpose. The current public Codex CLI surface in this environ
 
 The shipped `config/capacity.json` is disabled by default. To enable it privately, create `config/capacity.local.json` and adjust the command and patterns to match the actual output you see on your machine.
 
+Detailed setup instructions are in [docs/7d-capacity-guard.md](/Users/nishant/Documents/GitHub/Issue-Engine/docs/7d-capacity-guard.md).
+
 ## Commands
 
 ```bash
