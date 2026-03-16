@@ -52,6 +52,7 @@ export class CodexClient {
       dryRun,
       dryRunOutput: {
         summary: "Dry-run planner output.",
+        disposition: "ready_to_implement",
         assumptions: ["No repository mutations were performed."],
         implementationSteps: [
           "Inspect the target repo and confirm issue scope.",

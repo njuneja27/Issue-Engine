@@ -5,6 +5,10 @@ import type { CommandRunner } from "./shell.js";
 import type { GitHubIssue, PullRequestRecord, RepoProfile } from "./types.js";
 import { interpolateTemplate, nowIso, writeTextFile } from "./utils.js";
 
+export interface CreatePrOptions {
+  draft?: boolean;
+}
+
 export async function listChangedPaths(
   runner: CommandRunner,
   worktreePath: string,
@@ -53,7 +57,14 @@ export async function commitAndPush(
   return { changedPaths, commitMessage };
 }
 
-export async function createDraftPr(
+function buildPrBodyPath(
+  runDir: string,
+  branchName: string,
+): string {
+  return join(runDir, `${branchName}-pr-body.md`);
+}
+
+export async function createPr(
   runner: CommandRunner,
   profile: RepoProfile,
   issue: GitHubIssue,
@@ -63,6 +74,7 @@ export async function createDraftPr(
   runDir: string,
   logger: Logger,
   dryRun: boolean,
+  options: CreatePrOptions = {},
 ): Promise<PullRequestRecord | undefined> {
   const title = interpolateTemplate(profile.prTemplates.title, {
     issueNumber: issue.number,
@@ -78,12 +90,13 @@ export async function createDraftPr(
     defaultBranch: profile.defaultBranch,
     repoPath: profile.localRepoPath,
   });
-  const bodyPath = join(runDir, "pr-body.md");
+  const bodyPath = buildPrBodyPath(runDir, branchName);
   writeTextFile(bodyPath, body);
+  const isDraft = options.draft === true;
 
   if (dryRun) {
     logger.info(
-      `[dry-run] Would open draft PR against ${profile.github.owner}/${profile.github.repo} from ${branchName}`,
+      `[dry-run] Would open ${isDraft ? "draft " : ""}PR against ${profile.github.owner}/${profile.github.repo} from ${branchName}`,
     );
     return {
       profileName: profile.profileName,
@@ -92,19 +105,18 @@ export async function createDraftPr(
       prNumber: 0,
       url: `https://github.com/${profile.github.owner}/${profile.github.repo}/pull/dry-run`,
       branchName,
-      status: "DRAFT",
+      status: isDraft ? "DRAFT" : "OPEN",
       mergeState: "UNKNOWN",
       createdAt: nowIso(),
       updatedAt: nowIso(),
     };
   }
 
-  const result = await runner.run("gh", [
+  const prCreateArgs = [
     "pr",
     "create",
     "--repo",
     `${profile.github.owner}/${profile.github.repo}`,
-    "--draft",
     "--base",
     profile.defaultBranch,
     "--head",
@@ -113,7 +125,12 @@ export async function createDraftPr(
     title,
     "--body-file",
     bodyPath,
-  ], {
+  ];
+  if (isDraft) {
+    prCreateArgs.splice(2, 0, "--draft");
+  }
+
+  const result = await runner.run("gh", prCreateArgs, {
     cwd: worktreePath,
   });
 
@@ -134,9 +151,34 @@ export async function createDraftPr(
     prNumber: Number(numberMatch[1]),
     url,
     branchName,
-    status: "DRAFT",
+    status: isDraft ? "DRAFT" : "OPEN",
     mergeState: "UNKNOWN",
     createdAt: nowIso(),
     updatedAt: nowIso(),
   };
+}
+
+export async function createDraftPr(
+  runner: CommandRunner,
+  profile: RepoProfile,
+  issue: GitHubIssue,
+  runId: string,
+  branchName: string,
+  worktreePath: string,
+  runDir: string,
+  logger: Logger,
+  dryRun: boolean,
+): Promise<PullRequestRecord | undefined> {
+  return createPr(
+    runner,
+    profile,
+    issue,
+    runId,
+    branchName,
+    worktreePath,
+    runDir,
+    logger,
+    dryRun,
+    { draft: true },
+  );
 }

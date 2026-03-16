@@ -5,6 +5,8 @@ import type {
   GitHubIssue,
   IssueEdge,
   LockRecord,
+  ClarificationQuestionRecord,
+  ClarificationQuestionStatus,
   PullRequestRecord,
   RunPhase,
   RunRecord,
@@ -86,6 +88,26 @@ interface PullRequestRow {
   created_at: string;
   updated_at: string;
 }
+
+interface ClarificationQuestionRow {
+  question_row_id: number;
+  run_id: string;
+  issue_number: number;
+  question_key: string;
+  phase: string;
+  question_type: ClarificationQuestionRecord["questionType"];
+  prompt: string;
+  options_json: string;
+  status: "pending" | "answered";
+  answer: string | null;
+  selected_option: number | null;
+  asked_at: string;
+  answered_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+const currentSchemaVersion = 2;
 
 export class StateDatabase {
   readonly db: Database.Database;
@@ -201,6 +223,43 @@ export class StateDatabase {
 
       INSERT OR IGNORE INTO schema_version(version) VALUES (1);
     `);
+
+    const currentVersion = this.getSchemaVersion();
+    if (currentVersion < 2) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS clarification_questions (
+          question_row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_id TEXT NOT NULL,
+          issue_number INTEGER NOT NULL,
+          question_key TEXT NOT NULL,
+          phase TEXT NOT NULL,
+          question_type TEXT NOT NULL,
+          prompt TEXT NOT NULL,
+          options_json TEXT NOT NULL,
+          status TEXT NOT NULL,
+          answer TEXT,
+          selected_option INTEGER,
+          asked_at TEXT NOT NULL,
+          answered_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE (run_id, issue_number, question_key)
+        );
+      `);
+
+      this.setSchemaVersion(currentSchemaVersion);
+    }
+  }
+
+  private getSchemaVersion(): number {
+    const row = this.db
+      .prepare(`SELECT MAX(version) AS version FROM schema_version`)
+      .get() as { version: number | null } | undefined;
+    return row?.version ?? 0;
+  }
+
+  private setSchemaVersion(version: number): void {
+    this.db.prepare(`INSERT INTO schema_version(version) VALUES (?)`).run(version);
   }
 
   upsertIssues(profileName: string, issues: GitHubIssue[]): void {
@@ -416,6 +475,138 @@ export class StateDatabase {
     return rows.map(mapLock);
   }
 
+  upsertClarificationQuestions(
+    runId: string,
+    issueNumber: number,
+    phase: RunPhase,
+    questions: Array<{
+      questionId: string;
+      questionType: ClarificationQuestionRecord["questionType"];
+      question: string;
+      options?: string[];
+    }> = [],
+    now = nowIso(),
+  ): void {
+    const insert = this.db.prepare(`
+      INSERT INTO clarification_questions (
+        run_id,
+        issue_number,
+        question_key,
+        phase,
+        question_type,
+        prompt,
+        options_json,
+        status,
+        answer,
+        selected_option,
+        asked_at,
+        answered_at,
+        created_at,
+        updated_at
+      ) VALUES (
+        ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ?
+      )
+      ON CONFLICT(run_id, issue_number, question_key) DO UPDATE SET
+        phase = excluded.phase,
+        question_type = excluded.question_type,
+        prompt = excluded.prompt,
+        options_json = excluded.options_json,
+        status = CASE
+          WHEN status = 'answered' THEN status
+          ELSE excluded.status
+        END,
+        asked_at = excluded.asked_at,
+        updated_at = excluded.updated_at
+    `);
+
+    const tx = this.db.transaction((rows: typeof questions) => {
+      for (const question of rows) {
+        insert.run(
+          runId,
+          issueNumber,
+          question.questionId,
+          phase,
+          question.questionType,
+          question.question,
+          JSON.stringify(question.options ?? []),
+          "pending" as ClarificationQuestionStatus,
+          now,
+          now,
+          now,
+        );
+      }
+    });
+
+    tx(questions);
+  }
+
+  listClarificationQuestions(
+    runId: string,
+    status?: ClarificationQuestionStatus,
+  ): ClarificationQuestionRecord[] {
+    const query = status
+      ? `
+        SELECT *
+          FROM clarification_questions
+         WHERE run_id = ?
+           AND status = ?
+         ORDER BY question_row_id ASC
+      `
+      : `
+        SELECT *
+          FROM clarification_questions
+         WHERE run_id = ?
+         ORDER BY question_row_id ASC
+      `;
+
+    const rows = (status
+      ? this.db.prepare(query).all(runId, status)
+      : this.db.prepare(query).all(runId)) as ClarificationQuestionRow[];
+    return rows.map(mapClarificationQuestion);
+  }
+
+  setClarificationAnswer(
+    runId: string,
+    questionId: string,
+    answer: string,
+    selectedOption: number | null,
+    now = nowIso(),
+  ): void {
+    this.db
+      .prepare(`
+        UPDATE clarification_questions
+           SET status = 'answered',
+               answer = ?,
+               selected_option = ?,
+               answered_at = ?,
+               updated_at = ?
+         WHERE run_id = ?
+           AND question_key = ?
+      `)
+      .run(answer, selectedOption, now, now, runId, questionId);
+  }
+
+  getClarificationQuestions(runId: string): ClarificationQuestionRecord[] {
+    return this.listClarificationQuestions(runId);
+  }
+
+  getAnsweredClarificationSummary(runId: string): string {
+    const answered = this.getClarificationQuestions(runId).filter(
+      (question) => question.status === "answered",
+    );
+
+    if (answered.length === 0) {
+      return "";
+    }
+
+    const lines: string[] = [];
+    for (const question of answered) {
+      lines.push(`${question.questionKey}: ${question.answer ?? "(no answer)"}`);
+    }
+
+    return lines.join("\n");
+  }
+
   insertRun(record: RunRecord): void {
     this.db
       .prepare(`
@@ -495,7 +686,7 @@ export class StateDatabase {
       .prepare(
         `SELECT * FROM runs
           WHERE profile_name = ?
-            AND status IN ('queued', 'running')
+            AND status IN ('queued', 'running', 'blocked')
           ORDER BY started_at ASC`,
       )
       .all(profileName) as RunRow[];
@@ -507,7 +698,7 @@ export class StateDatabase {
       .prepare(
         `SELECT * FROM runs
           WHERE profile_name = ?
-            AND status = 'running'
+            AND status IN ('running', 'blocked')
           ORDER BY started_at ASC`,
       )
       .all(profileName) as RunRow[];
@@ -518,15 +709,47 @@ export class StateDatabase {
     profileName: string,
     options: { phase?: RunPhase; issueNumber?: number; now?: string } = {},
   ): RunRecord | undefined {
+    return this.claimRunWithStatus(profileName, {
+      status: "queued",
+      phase: options.phase,
+      issueNumber: options.issueNumber,
+      now: options.now,
+    });
+  }
+
+  claimBlockedRun(
+    profileName: string,
+    options: { issueNumber?: number; now?: string } = {},
+  ): RunRecord | undefined {
+    return this.claimRunWithStatus(profileName, {
+      status: "blocked",
+      issueNumber: options.issueNumber,
+      now: options.now,
+      excludeLockedIssues: false,
+    });
+  }
+
+  claimRunWithStatus(
+    profileName: string,
+    options: {
+      status: RunStatus;
+      phase?: RunPhase;
+      issueNumber?: number;
+      now?: string;
+      excludeLockedIssues?: boolean;
+    },
+  ): RunRecord | undefined {
     const now = options.now ?? nowIso();
     const tx = this.db.transaction(() => {
-      const whereClauses = [
-        "profile_name = ?",
-        "status = 'queued'",
-        "issue_number NOT IN (SELECT issue_number FROM locks WHERE profile_name = ? AND lease_expires_at > ?)",
-        "issue_number NOT IN (SELECT issue_number FROM runs WHERE profile_name = ? AND status = 'running')",
-      ];
-      const params: Array<string | number> = [profileName, profileName, now, profileName];
+      const whereClauses = ["profile_name = ?", "status = ?"];
+      const params: Array<string | number> = [profileName, options.status];
+
+      if (options.excludeLockedIssues !== false) {
+        whereClauses.push(
+          "issue_number NOT IN (SELECT issue_number FROM locks WHERE profile_name = ? AND lease_expires_at > ?)",
+        );
+        params.push(profileName, now);
+      }
 
       if (options.phase !== undefined) {
         whereClauses.push("phase = ?");
@@ -556,9 +779,9 @@ export class StateDatabase {
         `UPDATE runs
            SET status = 'running'
            WHERE run_id = ?
-             AND status = 'queued'`,
+             AND status = ?`,
       );
-      const result = update.run(queuedRun.run_id);
+      const result = update.run(queuedRun.run_id, options.status);
       if (result.changes === 0) {
         return undefined;
       }
@@ -738,6 +961,25 @@ function mapLock(row: LockRow): LockRecord {
     leaseExpiresAt: row.lease_expires_at,
     heartbeatAt: row.heartbeat_at,
     createdAt: row.created_at,
+  };
+}
+
+function mapClarificationQuestion(row: ClarificationQuestionRow): ClarificationQuestionRecord {
+  return {
+    runId: row.run_id,
+    issueNumber: row.issue_number,
+    questionKey: row.question_key,
+    phase: row.phase,
+    questionType: row.question_type,
+    prompt: row.prompt,
+    options: JSON.parse(row.options_json) as string[],
+    status: row.status,
+    answer: row.answer,
+    selectedOption: row.selected_option,
+    askedAt: row.asked_at,
+    answeredAt: row.answered_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 

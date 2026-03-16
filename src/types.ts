@@ -2,6 +2,17 @@ import type { CommandInput } from "./command-config.js";
 
 export type RunPhase =
   | "planning"
+  | "clarification"
+  | "review"
+  | "reconciliation"
+  | "implementation"
+  | "validation"
+  | "commit"
+  | "create_pr"
+  | "repair";
+
+export type ModelRunPhase =
+  | "planning"
   | "review"
   | "reconciliation"
   | "implementation"
@@ -14,7 +25,14 @@ export type RunStatus =
   | "running"
   | "succeeded"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "blocked";
+
+export type ClarificationQuestionType = "multiple_choice" | "yes_no" | "short_freeform";
+
+export type PlannerDisposition = "ready_to_implement" | "needs_clarification" | "blocked";
+
+export type ClarificationQuestionStatus = "pending" | "answered";
 
 export type IssueEdgeType =
   | "depends_on"
@@ -76,7 +94,7 @@ export interface RepoProfile {
     title: string;
     body: string;
   };
-  models: Record<RunPhase, ModelPolicy>;
+  models: Record<ModelRunPhase, ModelPolicy>;
   validation: {
     base: ValidationCommand[];
     pathRules?: ValidationPathRule[] | undefined;
@@ -150,6 +168,40 @@ export interface RunRecord {
   metadata?: Record<string, unknown> | undefined;
 }
 
+export interface ClarificationQuestionRecord {
+  runId: string;
+  issueNumber: number;
+  questionKey: string;
+  phase: RunPhase;
+  questionType: ClarificationQuestionType;
+  prompt: string;
+  options: string[];
+  status: ClarificationQuestionStatus;
+  answer: string | null;
+  selectedOption: number | null;
+  askedAt: string;
+  answeredAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PlannerClarificationQuestion {
+  questionId: string;
+  questionType: ClarificationQuestionType;
+  question: string;
+  options?: string[];
+}
+
+export interface ClarificationQuestionAnswer {
+  questionId: string;
+  answer: string;
+  selectedOption: number | null;
+}
+
+export interface RunOutcome {
+  status: "completed" | "blocked" | "failed";
+}
+
 export interface WorktreeRecord {
   profileName: string;
   issueNumber: number;
@@ -182,10 +234,17 @@ export interface SchedulerCandidate {
 
 export interface PlannerOutput {
   summary: string;
+  disposition: PlannerDisposition;
   assumptions: string[];
   implementationSteps: string[];
   validationPlan: string[];
   risks: string[];
+  clarificationQuestions?: Array<{
+    questionId: string;
+    questionType: ClarificationQuestionType;
+    question: string;
+    options?: string[];
+  }>;
 }
 
 export interface ReviewerOutput {

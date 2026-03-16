@@ -14,6 +14,7 @@ export function buildPlannerPrompt(
   issue: GitHubIssue,
   branchName: string,
   validationSummary: string,
+  clarificationContext: string,
 ): string {
   return interpolateTemplate(loadPromptTemplate(appConfig, "planner.md"), {
     profileName: profile.profileName,
@@ -27,6 +28,7 @@ export function buildPlannerPrompt(
     worktreeRoot: profile.worktreeRoot,
     defaultBranch: profile.defaultBranch,
     validationPolicy: validationSummary,
+    clarificationContext,
   });
 }
 
@@ -56,6 +58,7 @@ export function buildImplementerPrompt(
   branchName: string,
   plan: ReconciledPlan,
   validationSummary: string,
+  clarificationContext: string,
 ): string {
   return interpolateTemplate(loadPromptTemplate(appConfig, "implementer.md"), {
     profileName: profile.profileName,
@@ -68,6 +71,7 @@ export function buildImplementerPrompt(
     repoPath: profile.localRepoPath,
     planJson: JSON.stringify(plan, null, 2),
     validationPolicy: validationSummary,
+    clarificationContext,
   });
 }
 

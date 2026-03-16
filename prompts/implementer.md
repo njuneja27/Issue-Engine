@@ -17,6 +17,9 @@ Reconciled plan:
 Validation policy:
 {{validationPolicy}}
 
+Clarification answers (latest first):
+{{clarificationContext}}
+
 Implementation requirements:
 - Implement the issue in the current worktree.
 - Keep changes scoped to the issue.

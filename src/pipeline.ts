@@ -7,12 +7,32 @@ import { syncOpenIssues } from "./github.js";
 import { buildIssueGraph } from "./issue-graph.js";
 import type { Logger } from "./logging.js";
 import { createLockManager } from "./locks.js";
-import { buildImplementerPrompt, buildPlannerPrompt, buildReviewerPrompt, renderValidationSummary } from "./prompting.js";
-import { commitAndPush, createDraftPr, listChangedPaths } from "./prs.js";
+import {
+  buildImplementerPrompt,
+  buildPlannerPrompt,
+  buildReviewerPrompt,
+  renderValidationSummary,
+} from "./prompting.js";
+import {
+  commitAndPush,
+  createPr,
+  listChangedPaths,
+} from "./prs.js";
 import type { CommandRunner } from "./shell.js";
-import { listReadyIssues, nextReadyIssue } from "./scheduler.js";
+import { listReadyIssues } from "./scheduler.js";
 import type { CodexClient } from "./codex.js";
-import type { GitHubIssue, IssueEdge, PullRequestRecord, RepoProfile, RunRecord } from "./types.js";
+import type {
+  ClarificationQuestionAnswer,
+  ClarificationQuestionRecord,
+  ClarificationQuestionType,
+  GitHubIssue,
+  PlannerClarificationQuestion,
+  PlannerDisposition,
+  PlannerOutput,
+  RepoProfile,
+  RunPhase,
+  RunRecord,
+} from "./types.js";
 import { selectValidationCommands, runValidationCommands } from "./validation.js";
 import { prepareWorktree } from "./worktrees.js";
 import { ensureDir, nowIso, randomId } from "./utils.js";
@@ -27,6 +47,8 @@ export interface RunOnceOptions {
   dryRun: boolean;
   issueNumber?: number | undefined;
   runOwner?: string | undefined;
+  onClarificationRequest?: RunIssueOptions["onClarificationRequest"];
+  reportProgress?: RunIssueOptions["reportProgress"];
 }
 
 export interface RunOnceResult {
@@ -34,9 +56,15 @@ export interface RunOnceResult {
   issue: GitHubIssue;
   branchName: string;
   worktreePath: string;
-  pr?: PullRequestRecord | undefined;
+  pr?: ReturnType<typeof createPr> | undefined;
   dryRun: boolean;
-  validationResults: Array<{ name: string; command: string; status: "passed" | "failed" | "skipped" }>;
+  validationResults: Array<{
+    name: string;
+    command: string;
+    status: "passed" | "failed" | "skipped";
+  }>;
+  status: "completed" | "blocked";
+  clarificationQuestions?: PlannerClarificationQuestion[];
 }
 
 export interface RunIssueOptions {
@@ -47,17 +75,28 @@ export interface RunIssueOptions {
   runner: CommandRunner;
   codex: CodexClient;
   issue: GitHubIssue;
-  issues?: GitHubIssue[] | undefined;
   dryRun: boolean;
   runId?: string | undefined;
   runOwner?: string | undefined;
   requireIssueReady?: boolean | undefined;
+  onClarificationRequest?: (options: {
+    issue: GitHubIssue;
+    runId: string;
+    questions: PlannerClarificationQuestion[];
+    runLabel: string;
+    runDir: string;
+    existingAnswers: ClarificationQuestionRecord[];
+  }) => Promise<ClarificationQuestionAnswer[]>;
+  reportProgress?: (phase: RunPhase, summary: string, prUrl?: string) => void;
 }
 
 export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
-  const { profile, appConfig, db, logger, runner, codex, dryRun, runOwner } = options;
+  const { profile, appConfig, db, logger, runner, codex, dryRun, issueNumber, runOwner } = options;
+
   const issues = await syncOpenIssues(runner, db, profile, logger);
-  const selectedIssue = selectIssue(db, profile, options.issueNumber, issues);
+  const selectedIssue = issueNumber !== undefined
+    ? selectSpecificIssue(db, profile, issueNumber, issues, true)
+    : selectNextIssue(db, profile, issues);
   const owner = runOwner ?? `issue-engine:${process.pid}`;
 
   return runIssue({
@@ -67,11 +106,11 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
     logger,
     runner,
     codex,
-    dryRun,
-    issues,
     issue: selectedIssue,
+    dryRun,
     runOwner: owner,
-    requireIssueReady: true,
+    onClarificationRequest: options.onClarificationRequest,
+    reportProgress: options.reportProgress,
   });
 }
 
@@ -84,400 +123,608 @@ export async function runIssue(options: RunIssueOptions): Promise<RunOnceResult>
     runner,
     codex,
     issue,
-    issues: syncedIssues,
     dryRun,
     runId,
     runOwner,
-    requireIssueReady,
+    requireIssueReady = false,
+    onClarificationRequest,
+    reportProgress,
   } = options;
-  const effectiveRunId = runId ?? randomId(`run-${profile.profileName}-issue-${issue.number}`);
+
   const owner = runOwner ?? `issue-engine:${process.pid}`;
+  const runLabel = `[run ${runId ?? `issue-${issue.number}`}]`;
   const allowBypassApprovalsAndSandbox = profile.codex?.allowBypassApprovalsAndSandbox === true;
-  const runLabel = `[run ${effectiveRunId}]`;
+  const effectiveRunId = runId ?? randomId(`run-${profile.profileName}-issue-${issue.number}`);
   const detailMode = isVerboseMode();
-  const phaseNames = [
-    "Sync",
-    "Graph",
-    "Planning",
-    "Review",
-    "Implementation",
-    "Validation",
-    "Commit",
-    "Create PR",
-  ];
-  const totalPhases = phaseNames.length;
-  const phase = async <T>(index: number, name: string, task: () => Promise<T>): Promise<T> => {
-    const label = `Phase ${index}/${totalPhases}: ${name}`;
-    const phaseStart = Date.now();
-    logger.info(`${runLabel} ${label} start`);
+  const runDir = join(appConfig.paths.runLogDir, effectiveRunId);
+  ensureDir(runDir);
+
+  const phase = async <T>(phaseName: RunPhase, task: () => Promise<T>): Promise<T> => {
+    const startedAt = Date.now();
     try {
-      const result = await task();
-      const elapsed = Date.now() - phaseStart;
-      logger.info(`${runLabel} ${label} done (${elapsed}ms)`);
-      return result;
+      reportProgress?.(phaseName, `${phaseName} start`);
+      const value = await task();
+      logger.debug(
+        `${runLabel} phase=${phaseName} done elapsedMs=${Date.now() - startedAt}`,
+      );
+      reportProgress?.(phaseName, `${phaseName} done`);
+      return value;
     } catch (error) {
-      const elapsed = Date.now() - phaseStart;
-      const message = error instanceof Error ? error.message : String(error);
-      logger.warn(`${runLabel} ${label} failed (${elapsed}ms): ${message}`);
+      logger.warn(
+        `${runLabel} phase=${phaseName} failed elapsedMs=${Date.now() - startedAt}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
       throw error;
     }
   };
 
-  if (!dryRun) {
+  const existingRun = runId ? db.getRun(runId) : undefined;
+  let selectedIssue = issue;
+  let lockAcquired = false;
+  let worktreePath = "";
+  let branchName = "";
+  let plannerDisposition: PlannerDisposition = "ready_to_implement";
+  let wasBlocked = false;
+  let blockedQuestions: PlannerClarificationQuestion[] = [];
+  let currentRun: RunRecord;
+
+  if (!dryRun && !existingRun) {
     await enforceCapacityForNewWork(appConfig, runner, logger);
   }
 
-  logger.info(
-    `${runLabel} run envelope profile=${profile.profileName} issue=#${issue.number} runId=${effectiveRunId} owner=${owner} mode=${dryRun ? "dry-run" : "real"}`,
-  );
+  if (existingRun) {
+    selectedIssue = selectSpecificIssue(db, profile, existingRun.issueNumber, [], false);
+    currentRun = {
+      ...existingRun,
+      status: "running",
+      phase: existingRun.phase,
+      metadata: {
+        ...(existingRun.metadata ?? {}),
+        resumedBy: owner,
+      },
+    };
+    db.updateRun(existingRun.runId, currentRun);
+  } else {
+    currentRun = {
+      runId: effectiveRunId,
+      profileName: profile.profileName,
+      issueNumber: selectedIssue.number,
+      phase: "planning",
+      status: "running",
+      dryRun,
+      startedAt: nowIso(),
+      metadata: {
+        codexBypassApprovalsAndSandbox: allowBypassApprovalsAndSandbox,
+        codexBypassApprovalsAndSandboxConfigured: profile.codex !== undefined,
+        runOwner: owner,
+      },
+    };
+    db.insertRun(currentRun);
+  }
 
-  let selectedIssue: GitHubIssue | undefined;
-  let lockManager: ReturnType<typeof createLockManager> | undefined;
-
-  try {
-    const issues = await phase(1, phaseNames[0], async () => {
-      const openIssues = syncedIssues ?? (await syncOpenIssues(runner, db, profile, logger));
-      if (syncedIssues) {
-        logger.debug(`${runLabel} using preloaded open issues (${openIssues.length})`);
-      } else if (detailMode) {
-        logger.info(`${runLabel} synced ${openIssues.length} open issues`);
-      }
-      return openIssues;
-    });
-
-    const edges = await phase(2, phaseNames[1], async () => {
-      const builtEdges = await buildIssueGraph(
-        profile,
-        issues,
-        logger,
-        !dryRun && profile.llmDependencyNormalization?.enabled
-          ? codex.createDependencyNormalizer()
-          : undefined,
-      );
-      db.replaceIssueEdges(profile.profileName, builtEdges);
-      if (detailMode) {
-        logger.info(`${runLabel} rebuilt graph with ${builtEdges.length} edge(s)`);
-      }
-      return builtEdges;
-    });
-
-    selectedIssue = selectIssue(db, profile, issue.number, issues, edges, requireIssueReady ?? false);
-    if (detailMode) {
-      logger.info(`${runLabel} selected issue #${selectedIssue.number}`);
-    }
-
-    const runDir = join(appConfig.paths.runLogDir, effectiveRunId);
-    ensureDir(runDir);
-
-    lockManager = createLockManager(db, profile.profileName, appConfig.defaultLockLeaseMs);
-    if (!lockManager.acquire(selectedIssue.number, owner)) {
+  const run = existingRun ?? currentRun;
+  const lockManager = createLockManager(db, profile.profileName, appConfig.defaultLockLeaseMs);
+  if (!existingRun) {
+    lockAcquired = lockManager.acquire(selectedIssue.number, owner);
+    if (!lockAcquired) {
       throw new Error(`Issue #${selectedIssue.number} is already locked`);
     }
-    if (detailMode) {
-      logger.info(`${runLabel} lock acquired for issue #${selectedIssue.number}`);
-    }
+  } else {
+    // Keep any pre-existing lock if this is a resumed blocked run.
+    lockManager.heartbeat(selectedIssue.number, owner);
+  }
 
-    if (runId) {
-      const existingRun = db.getRun(runId);
-      if (!existingRun) {
-        throw new Error(`Run ${runId} not found`);
-      }
+  logger.info(
+    `${runLabel} run envelope profile=${profile.profileName} issue=#${selectedIssue.number} runId=${run.runId} owner=${owner} mode=${dryRun ? "dry-run" : "real"}`,
+  );
 
-      db.updateRun(runId, {
-        status: "running",
-        phase: "planning",
-        dryRun,
-        startedAt: existingRun.startedAt,
-        metadata: {
-          ...(existingRun.metadata ?? {}),
-          queuedPhase: existingRun.phase,
-          resumedBy: owner,
-        },
-      });
-      logger.info(`${runLabel} resumed run ${runId} from ${existingRun.phase}`);
-    } else {
-      const runRecord: RunRecord = {
-        runId: effectiveRunId,
-        profileName: profile.profileName,
-        issueNumber: selectedIssue.number,
-        phase: "planning",
-        status: "running",
-        dryRun,
-        startedAt: nowIso(),
-        metadata: {
-          codexBypassApprovalsAndSandbox: allowBypassApprovalsAndSandbox,
-          codexBypassApprovalsAndSandboxConfigured: profile.codex !== undefined,
-          runOwner: owner,
-        },
-      };
-      db.insertRun(runRecord);
-      logger.info(`${runLabel} created run record`);
-    }
-
-    const validationSummary = renderValidationSummary(profile);
-
-    const planning = await phase(3, phaseNames[2], async () => {
-      logger.info(`${runLabel} preparing worktree`);
-      const worktree = await prepareWorktree(
+  const preparePhase = async (): Promise<void> => {
+    const worktree = await phase("planning", async () =>
+      prepareWorktree(
         runner,
         db,
         profile,
-        selectedIssue!,
-        logger,
-        dryRun,
-      );
-
-      db.updateRun(effectiveRunId, {
-        phase: "planning",
-        worktreePath: worktree.path,
-        metadata: {
-          reusedWorktree: worktree.reused,
-        },
-      });
-      if (detailMode) {
-        logger.info(`${runLabel} worktree ready at ${worktree.path}`);
-      }
-      lockManager?.heartbeat(selectedIssue!.number, owner);
-
-      const plannerPrompt = buildPlannerPrompt(
-        appConfig,
-        profile,
-        selectedIssue!,
-        worktree.branchName,
-        validationSummary,
-      );
-      const planner = await codex.runPlanner(
-        profile,
-        plannerPrompt,
-        runDir,
-        dryRun ? appConfig.paths.rootDir : worktree.path,
-        dryRun,
-        runLabel,
-      );
-      db.updateRun(effectiveRunId, {
-        phase: "review",
-        metadata: {
-          codexBypassApprovalsAndSandbox: allowBypassApprovalsAndSandbox,
-          codexBypassApprovalsAndSandboxConfigured: profile.codex !== undefined,
-          plannerModel: planner.modelUsed,
-          promptPath: planner.promptPath,
-          plannerResponsePath: planner.responsePath,
-        },
-      });
-      lockManager?.heartbeat(selectedIssue!.number, owner);
-      return { planner, worktree };
-    });
-
-    const planner = planning.planner;
-    const worktree = planning.worktree;
-
-    const reviewed = await phase(4, phaseNames[3], async () => {
-      const reviewerPrompt = buildReviewerPrompt(
-        appConfig,
-        profile,
-        selectedIssue!,
-        planner.output,
-        validationSummary,
-      );
-      const reviewer = await codex.runReviewer(
-        profile,
-        reviewerPrompt,
-        runDir,
-        dryRun ? appConfig.paths.rootDir : worktree.path,
-        dryRun,
-        runLabel,
-      );
-      const reconciledPlan = codex.reconcilePlan(planner.output, reviewer.output);
-      db.updateRun(effectiveRunId, {
-        phase: "implementation",
-        metadata: {
-          codexBypassApprovalsAndSandbox: allowBypassApprovalsAndSandbox,
-          codexBypassApprovalsAndSandboxConfigured: profile.codex !== undefined,
-          plannerModel: planner.modelUsed,
-          reviewerModel: reviewer.modelUsed,
-          reviewerResponsePath: reviewer.responsePath,
-        },
-      });
-      lockManager?.heartbeat(selectedIssue!.number, owner);
-      return { reviewer, reconciledPlan };
-    });
-
-    const reviewer = reviewed.reviewer;
-    const reconciledPlan = reviewed.reconciledPlan;
-
-    const implementer = await phase(5, phaseNames[4], async () => {
-      lockManager?.heartbeat(selectedIssue!.number, owner);
-      const implementerPrompt = buildImplementerPrompt(
-        appConfig,
-        profile,
-        selectedIssue!,
-        worktree.branchName,
-        reconciledPlan,
-        validationSummary,
-      );
-      return codex.runImplementer(
-        profile,
-        implementerPrompt,
-        runDir,
-        dryRun ? appConfig.paths.rootDir : worktree.path,
-        dryRun,
-        runLabel,
-      );
-    });
-
-    const validation = await phase(6, phaseNames[5], async () => {
-      const changedPaths = dryRun
-        ? implementer.output.changedFiles
-        : await listChangedPaths(runner, worktree.path);
-      const validationCommands = selectValidationCommands(profile, changedPaths);
-      if (detailMode) {
-        logger.info(`${runLabel} running ${validationCommands.length} validation command(s)`);
-      }
-      const validationResults = await runValidationCommands(
-        runner,
-        profile,
-        worktree.path,
-        validationCommands,
-        logger,
-        dryRun,
-      );
-      lockManager?.heartbeat(selectedIssue!.number, owner);
-      return { changedPaths, validationResults };
-    });
-
-    const commitResult = await phase(7, phaseNames[6], async () =>
-      commitAndPush(
-        runner,
-        profile,
-        selectedIssue!,
-        worktree.path,
-        worktree.branchName,
+        selectedIssue,
         logger,
         dryRun,
       ),
     );
-    lockManager?.heartbeat(selectedIssue.number, owner);
+    worktreePath = worktree.path;
+    branchName = worktree.branchName;
+    db.updateRun(run.runId, {
+      phase: "planning",
+      worktreePath,
+      metadata: {
+        ...(run.metadata ?? {}),
+        reusedWorktree: worktree.reused,
+      },
+    });
+  };
 
-    const pr = await phase(8, phaseNames[7], async () => {
-      if (dryRun || commitResult.changedPaths.length > 0 || implementer.output.status === "implemented") {
-        const createdPr = await createDraftPr(
+  const runWithHeartbeat = async <T>(task: () => Promise<T>): Promise<T> => {
+    lockManager.heartbeat(selectedIssue.number, owner);
+    return task();
+  };
+
+  try {
+    if (!existingRun || existingRun.status !== "blocked") {
+      const edges = await phase("reconciliation", async () => {
+        const openIssues = await syncOpenIssues(runner, db, profile, logger);
+        const selectedOpenIssues = issueSelectionIssues(openIssues);
+        const graph = await buildIssueGraph(
+          profile,
+          selectedOpenIssues,
+          logger,
+          !dryRun && profile.llmDependencyNormalization?.enabled
+            ? codex.createDependencyNormalizer()
+            : undefined,
+        );
+        db.replaceIssueEdges(profile.profileName, graph);
+        return graph;
+      });
+
+      if (requireIssueReady && existingRun?.status !== "blocked") {
+        const activeIssueNumbers = new Set(
+          db.getActiveRuns(profile.profileName).map((run) => run.issueNumber),
+        );
+        const lockedIssueNumbers = new Set(
+          db.getActiveLocks(profile.profileName).map((lock) => lock.issueNumber),
+        );
+        const ready = listReadyIssues(
+          profile,
+          db.getIssues(profile.profileName, "OPEN"),
+          edges,
+          activeIssueNumbers,
+          lockedIssueNumbers,
+        );
+        if (!ready.some((item) => item.issue.number === selectedIssue.number)) {
+          throw new Error(`Issue #${selectedIssue.number} is not currently ready to run`);
+        }
+      }
+    }
+
+    await preparePhase();
+
+    const clarificationSummary = db.getAnsweredClarificationSummary(run.runId);
+    const validationSummary = renderValidationSummary(profile);
+
+    let planner: { output: PlannerOutput; modelUsed: string; responsePath: string };
+    const previousPlanner = extractPlannerFromMetadata(run.metadata);
+
+    if (existingRun?.status === "blocked" && previousPlanner) {
+      planner = { output: previousPlanner, modelUsed: "resume", responsePath: "" };
+    } else {
+      const plannerPrompt = buildPlannerPrompt(
+        appConfig,
+        profile,
+        selectedIssue,
+        branchName,
+        validationSummary,
+        clarificationSummary,
+      );
+        planner = await phase("planning", () =>
+        runWithHeartbeat(() =>
+          codex.runPlanner(
+            profile,
+            plannerPrompt,
+            runDir,
+            dryRun ? appConfig.paths.rootDir : worktreePath,
+            dryRun,
+            runLabel,
+          ),
+        ),
+      );
+    }
+
+    db.updateRun(run.runId, {
+      phase: "review",
+      metadata: {
+        ...(run.metadata ?? {}),
+        plannerModel: planner.modelUsed,
+        plannerResponsePath: planner.responsePath,
+        plannerSummary: planner.output.summary,
+        plannerDisposition: planner.output.disposition,
+        plannerOutput: planner.output,
+      },
+    });
+    plannerDisposition = planner.output.disposition;
+
+    if (planner.output.disposition === "needs_clarification") {
+      db.upsertClarificationQuestions(
+        run.runId,
+        selectedIssue.number,
+        "clarification",
+        (planner.output.clarificationQuestions ?? []).map((question) => ({
+          questionId: question.questionId,
+          questionType: question.questionType,
+          question: question.question,
+          options: question.options,
+        })),
+      );
+
+      blockedQuestions = db
+        .listClarificationQuestions(run.runId, "pending")
+        .map((question) => ({
+          questionId: question.questionKey,
+          questionType: question.questionType,
+          question: question.prompt,
+          options: question.options,
+        }));
+
+      if (blockedQuestions.length > 0) {
+        if (!onClarificationRequest) {
+          wasBlocked = true;
+          db.updateRun(run.runId, {
+            phase: "clarification",
+            status: "blocked",
+            metadata: {
+              ...(run.metadata ?? {}),
+              plannerDisposition,
+              blockedAt: nowIso(),
+            },
+          });
+          return {
+            runId: run.runId,
+            issue: selectedIssue,
+            branchName,
+            worktreePath,
+            dryRun,
+            validationResults: [],
+            status: "blocked",
+            clarificationQuestions: blockedQuestions,
+          };
+        }
+
+        const existingAnswers = db.getClarificationQuestions(run.runId);
+        await requestClarificationAnswers({
+          db,
+          runId: run.runId,
+          issue: selectedIssue,
+          questions: blockedQuestions,
+          existingAnswers,
+          onClarificationRequest,
+          runLabel,
+          runDir: join(appConfig.paths.runLogDir, run.runId),
+        });
+      }
+      db.updateRun(run.runId, {
+        phase: "implementation",
+        metadata: {
+          ...(run.metadata ?? {}),
+          clarificationAnsweredAt: nowIso(),
+        },
+      });
+      plannerDisposition = "ready_to_implement";
+    } else if (planner.output.disposition === "blocked") {
+      db.updateRun(run.runId, {
+        status: "succeeded",
+        phase: "implementation",
+        endedAt: nowIso(),
+        metadata: {
+          ...(run.metadata ?? {}),
+          plannerDisposition,
+          blockedByPlanner: true,
+          plannerSummary: planner.output.summary,
+        },
+      });
+
+      return {
+        runId: run.runId,
+        issue: selectedIssue,
+        branchName,
+        worktreePath,
+        dryRun,
+        validationResults: [],
+        status: "completed",
+      };
+    }
+
+    const reviewResult = await phase("review", () =>
+      runWithHeartbeat(async () => {
+        const reviewerPrompt = buildReviewerPrompt(
+          appConfig,
+          profile,
+          selectedIssue,
+          planner.output,
+          validationSummary,
+        );
+        return codex.runReviewer(
+          profile,
+          reviewerPrompt,
+          runDir,
+          dryRun ? appConfig.paths.rootDir : worktreePath,
+          dryRun,
+          runLabel,
+        );
+      }),
+    );
+    const reconciledPlan = codex.reconcilePlan(planner.output, reviewResult.output);
+    db.updateRun(run.runId, {
+      phase: "implementation",
+      metadata: {
+        ...(run.metadata ?? {}),
+        reviewerModel: reviewResult.modelUsed,
+        reviewerResponsePath: reviewResult.responsePath,
+      },
+    });
+
+    const implementer = await phase("implementation", () =>
+      runWithHeartbeat(async () =>
+        codex.runImplementer(
+          profile,
+          buildImplementerPrompt(
+            appConfig,
+            profile,
+            selectedIssue,
+            branchName,
+            reconciledPlan,
+            validationSummary,
+            db.getAnsweredClarificationSummary(run.runId),
+          ),
+          runDir,
+          dryRun ? appConfig.paths.rootDir : worktreePath,
+          dryRun,
+          runLabel,
+        ),
+      ),
+    );
+
+    const validation = await phase("validation", () =>
+      runWithHeartbeat(async () => {
+        const changedPaths = dryRun
+          ? implementer.output.changedFiles
+          : await listChangedPaths(runner, worktreePath);
+        const commands = selectValidationCommands(profile, changedPaths);
+        if (detailMode) {
+          logger.info(`${runLabel} running ${commands.length} validation command(s)`);
+        }
+        return {
+          changedPaths,
+          validationResults: await runValidationCommands(
+            runner,
+            profile,
+            worktreePath,
+            commands,
+            logger,
+            dryRun,
+          ),
+          followUps: implementer.output.followUps,
+        };
+      }),
+    );
+
+    const commitResult = await phase("commit", () =>
+      runWithHeartbeat(async () =>
+        commitAndPush(
           runner,
           profile,
-          selectedIssue!,
-          effectiveRunId,
-          worktree.branchName,
-          worktree.path,
-          runDir,
+          selectedIssue,
+          worktreePath,
+          branchName,
+          logger,
+          dryRun,
+        ),
+      ),
+    );
+    void commitResult;
+
+    const shouldCreatePr = !dryRun && implementer.output.status === "implemented";
+    const pr = await phase("create_pr", () =>
+      runWithHeartbeat(async () => {
+        if (!shouldCreatePr || implementer.output.changedFiles.length === 0) {
+          if (detailMode) {
+            logger.info(`${runLabel} no PR created (no implementer changes)`);
+          }
+          return undefined;
+        }
+
+        const createdPr = await createPr(
+          runner,
+          profile,
+          selectedIssue,
+          run.runId,
+          branchName,
+          worktreePath,
+          join(appConfig.paths.runLogDir, run.runId),
           logger,
           dryRun,
         );
-        if (createdPr) {
-          db.upsertPr(createdPr);
+        if (!createdPr) {
+          return undefined;
         }
+        db.upsertPr(createdPr);
+        reportProgress?.("create_pr", "Created non-draft PR", createdPr.url);
         return createdPr;
-      }
+      }),
+    );
 
-      if (detailMode) {
-        logger.info(`${runLabel} no PR created (no changes and no implementer output)`);
-      }
-      return undefined;
-    });
-
-    db.updateRun(effectiveRunId, {
-      phase: "implementation",
+    db.updateRun(run.runId, {
+      phase: "create_pr",
       status: "succeeded",
       endedAt: nowIso(),
       metadata: {
-        codexBypassApprovalsAndSandbox: allowBypassApprovalsAndSandbox,
-        codexBypassApprovalsAndSandboxConfigured: profile.codex !== undefined,
-        plannerModel: planner.modelUsed,
-        reviewerModel: reviewer.modelUsed,
-        implementerModel: implementer.modelUsed,
+        ...(run.metadata ?? {}),
+        plannerDisposition,
+        prUrl: pr?.url,
         changedPaths: validation.changedPaths,
         validationResults: validation.validationResults,
-        prUrl: pr?.url,
+        followUps: validation.followUps,
+        reconciliationSummary: reconciledPlan.summary,
+        implementationSummary: implementer.output.summary,
       },
     });
 
-    logger.info(
-      `${runLabel} completed successfully${pr ? ` with PR ${pr.url}` : ""}`,
-    );
-
     return {
-      runId: effectiveRunId,
-      issue: selectedIssue!,
-      branchName: worktree.branchName,
-      worktreePath: worktree.path,
+      runId: run.runId,
+      issue: selectedIssue,
+      branchName,
+      worktreePath,
       pr,
       dryRun,
       validationResults: validation.validationResults,
+      status: "completed",
     };
   } catch (error) {
-    db.updateRun(effectiveRunId, {
+    db.updateRun(run.runId, {
       status: "failed",
       endedAt: nowIso(),
       metadata: {
+        ...(run.metadata ?? {}),
         error: error instanceof Error ? error.message : String(error),
       },
     });
-    const errorIssue = selectedIssue ? `issue #${selectedIssue.number}` : `requested issue #${issue.number}`;
-    logger.warn(`${runLabel} failed for ${errorIssue}: ${error instanceof Error ? error.message : String(error)}`);
+    logger.warn(
+      `${runLabel} failed for issue #${selectedIssue.number}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
     throw error;
   } finally {
-    if (lockManager && selectedIssue) {
+    if (lockAcquired) {
       lockManager.release(selectedIssue.number, owner);
-      logger.info(`${runLabel} lock released`);
     }
+    if (!worktreePath) {
+      return;
+    }
+    lockManager.heartbeat(selectedIssue.number, owner);
   }
+}
+
+async function requestClarificationAnswers(input: {
+  db: StateDatabase;
+  runId: string;
+  issue: GitHubIssue;
+  questions: PlannerClarificationQuestion[];
+  existingAnswers: ClarificationQuestionRecord[];
+  onClarificationRequest: NonNullable<RunIssueOptions["onClarificationRequest"]>;
+  runLabel: string;
+  runDir: string;
+}): Promise<void> {
+  const answerPayload = await input.onClarificationRequest({
+    issue: input.issue,
+    runId: input.runId,
+    questions: input.questions,
+    existingAnswers: input.existingAnswers,
+    runLabel: input.runLabel,
+    runDir: input.runDir,
+  });
+
+  for (const question of input.questions) {
+    const answer = answerPayload.find((item) => item.questionId === question.questionId);
+    if (!answer) {
+      continue;
+    }
+    input.db.setClarificationAnswer(
+      input.runId,
+      question.questionId,
+      normalizeAnswerText(answer.answer),
+      normalizeSelectedOption(question.questionType, answer),
+    );
+  }
+  const unanswered = input.questions.filter(
+    (question) =>
+      !answerPayload.some((answer) => answer.questionId === question.questionId),
+  );
+  if (unanswered.length > 0) {
+    throw new Error(`Missing answers for clarification questions: ${unanswered.map((question) => question.questionId).join(", ")}`);
+  }
+}
+
+function normalizeAnswerText(raw: string): string {
+  return raw.trim();
+}
+
+function normalizeSelectedOption(
+  questionType: ClarificationQuestionType,
+  answer: ClarificationQuestionAnswer,
+): number | null {
+  if (questionType !== "multiple_choice") {
+    return null;
+  }
+
+  return answer.selectedOption;
+}
+
+function issueSelectionIssues(issues: GitHubIssue[]): GitHubIssue[] {
+  return issues.filter((issue) => issue.state === "OPEN");
+}
+
+function selectSpecificIssue(
+  db: StateDatabase,
+  profile: RepoProfile,
+  issueNumber: number,
+  issues: GitHubIssue[],
+  requireReady: boolean,
+): GitHubIssue {
+  const issue = issues.find((item) => item.number === issueNumber)
+    ?? db.getIssue(profile.profileName, issueNumber);
+  if (!issue || issue.state !== "OPEN") {
+    throw new Error(`Issue #${issueNumber} is not open in local state`);
+  }
+
+  if (!requireReady) {
+    return issue;
+  }
+
+  const openIssues = db.getIssues(profile.profileName, "OPEN");
+  const edges = db.getIssueEdges(profile.profileName);
+  const activeIssueNumbers = new Set(
+    db.getActiveRuns(profile.profileName).map((run) => run.issueNumber),
+  );
+  const lockedIssueNumbers = new Set(
+    db.getActiveLocks(profile.profileName).map((lock) => lock.issueNumber),
+  );
+  const ready = listReadyIssues(
+    profile,
+    openIssues,
+    edges,
+    activeIssueNumbers,
+    lockedIssueNumbers,
+  );
+  const candidate = ready.find((item) => item.issue.number === issueNumber);
+  if (!candidate) {
+    throw new Error(`Issue #${issueNumber} is not currently ready to run`);
+  }
+  return issue;
+}
+
+function selectNextIssue(
+  db: StateDatabase,
+  profile: RepoProfile,
+  issues: GitHubIssue[],
+): GitHubIssue {
+  const edges = db.getIssueEdges(profile.profileName);
+  const openIssueNumbers = new Set(
+    issues.filter((issue) => issue.state === "OPEN").map((issue) => issue.number),
+  );
+  const activeIssueNumbers = new Set(
+    db.getActiveRuns(profile.profileName).map((run) => run.issueNumber),
+  );
+  const lockedIssueNumbers = new Set(
+    db.getActiveLocks(profile.profileName).map((lock) => lock.issueNumber),
+  );
+  const ready = listReadyIssues(
+    profile,
+    issues.filter((issue) => issue.state === "OPEN"),
+    edges,
+    activeIssueNumbers,
+    lockedIssueNumbers,
+  ).filter((candidate) => openIssueNumbers.has(candidate.issue.number));
+  if (ready.length === 0) {
+    throw new Error(`No ready issue found for profile ${profile.profileName}`);
+  }
+  return ready[0].issue;
 }
 
 function isVerboseMode(): boolean {
   return process.env.ISSUE_ENGINE_FEEDBACK_MODE?.trim().toLowerCase() === "verbose";
 }
 
-function selectIssue(
-  db: StateDatabase,
-  profile: RepoProfile,
-  requestedIssueNumber?: number,
-  issues?: GitHubIssue[],
-  edges?: IssueEdge[],
-  requireReady = true,
-): GitHubIssue {
-  if (requestedIssueNumber !== undefined) {
-    const requested = db.getIssue(profile.profileName, requestedIssueNumber);
-    if (!requested || requested.state !== "OPEN") {
-      throw new Error(`Issue #${requestedIssueNumber} is not open in local state`);
-    }
-
-    if (!requireReady) {
-      return requested;
-    }
-
-    const openIssues = issues ?? db.getIssues(profile.profileName, "OPEN");
-    const parsedEdges = edges ?? db.getIssueEdges(profile.profileName);
-    const activeIssueNumbers = new Set(
-      db.getActiveRuns(profile.profileName).map((run) => run.issueNumber),
-    );
-    const lockedIssueNumbers = new Set(
-      db.getActiveLocks(profile.profileName).map((lock) => lock.issueNumber),
-    );
-    const ready = listReadyIssues(
-      profile,
-      openIssues,
-      parsedEdges,
-      activeIssueNumbers,
-      lockedIssueNumbers,
-    );
-    const candidate = ready.find((item) => item.issue.number === requestedIssueNumber);
-    if (!candidate) {
-      throw new Error(`Issue #${requestedIssueNumber} is not currently ready to run`);
-    }
-    return requested;
+function extractPlannerFromMetadata(metadata: Record<string, unknown> | undefined): PlannerOutput | undefined {
+  const candidate = metadata?.plannerOutput;
+  if (!candidate || typeof candidate !== "object") {
+    return undefined;
   }
-
-  const next = nextReadyIssue(db, profile);
-  if (!next) {
-    throw new Error(`No ready issue found for profile ${profile.profileName}`);
-  }
-  return next.issue;
+  return candidate as PlannerOutput;
 }
