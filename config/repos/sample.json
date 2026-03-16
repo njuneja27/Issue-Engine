@@ -1,0 +1,114 @@
+{
+  "profileName": "sample",
+  "description": "Demonstration profile. Copy and edit for a real repository.",
+  "github": {
+    "owner": "example-owner",
+    "repo": "example-repo"
+  },
+  "localRepoPath": "/absolute/path/to/your/repo",
+  "worktreeRoot": "/absolute/path/to/issue-engine-worktrees/sample",
+  "defaultBranch": "main",
+  "concurrency": 2,
+  "allowMetaIssues": false,
+  "branchNameTemplate": "codex/issue-{{issueNumber}}-{{slug}}",
+  "prTemplates": {
+    "title": "[Issue #{{issueNumber}}] {{issueTitle}}",
+    "body": "Implements issue #{{issueNumber}}.\n\n- Source issue: {{issueUrl}}\n- Branch: {{branchName}}\n- Base: {{defaultBranch}}\n"
+  },
+  "models": {
+    "planning": {
+      "primary": "gpt-5.4",
+      "fallbacks": [
+        "gpt-5.3-codex-spark"
+      ],
+      "reasoningEffort": "xhigh"
+    },
+    "review": {
+      "primary": "gpt-5.3-codex-spark",
+      "fallbacks": [
+        "gpt-5.4"
+      ],
+      "reasoningEffort": "xhigh"
+    },
+    "reconciliation": {
+      "primary": "gpt-5.3-codex-spark",
+      "fallbacks": [
+        "gpt-5.4"
+      ],
+      "reasoningEffort": "xhigh"
+    },
+    "implementation": {
+      "primary": "gpt-5.3-codex-spark",
+      "fallbacks": [
+        "gpt-5.4"
+      ],
+      "reasoningEffort": "xhigh"
+    },
+    "repair": {
+      "primary": "gpt-5.3-codex-spark",
+      "fallbacks": [
+        "gpt-5.4"
+      ],
+      "reasoningEffort": "xhigh"
+    }
+  },
+  "validation": {
+    "base": [
+      {
+        "name": "quick test",
+        "command": "npm test -- --runInBand"
+      }
+    ],
+    "pathRules": [
+      {
+        "patterns": [
+          "src/**/*.ts",
+          "package.json"
+        ],
+        "commands": [
+          {
+            "name": "build",
+            "command": "npm run build"
+          }
+        ]
+      },
+      {
+        "patterns": [
+          "docs/**"
+        ],
+        "commands": [
+          {
+            "name": "docs lint",
+            "command": "npm run lint:docs",
+            "optional": true
+          }
+        ]
+      }
+    ]
+  },
+  "labels": {
+    "priorityMap": {
+      "priority:critical": 100,
+      "priority:high": 80,
+      "priority:medium": 50,
+      "priority:low": 10
+    },
+    "epic": [
+      "epic"
+    ],
+    "skip": [
+      "skip-orchestrator",
+      "wontfix"
+    ],
+    "meta": [
+      "meta"
+    ]
+  },
+  "dependencyOverrides": [],
+  "llmDependencyNormalization": {
+    "enabled": false,
+    "confidenceThreshold": 0.9,
+    "model": "gpt-5.4",
+    "reasoningEffort": "xhigh"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "enabled": false,
+  "command": "codex login status",
+  "minRemainingPercent": 5,
+  "blockNewWork": true,
+  "failOpen": true,
+  "windowLabel": "7d",
+  "remainingPercentPatterns": [
+    "(?<remaining>\\d+(?:\\.\\d+)?)%\\s*(?:remaining|left)",
+    "(?:remaining|left)\\s*:?\\s*(?<remaining>\\d+(?:\\.\\d+)?)%"
+  ],
+  "usedPercentPatterns": [
+    "(?<used>\\d+(?:\\.\\d+)?)%\\s*used",
+    "used\\s*:?\\s*(?<used>\\d+(?:\\.\\d+)?)%"
+  ]
+}

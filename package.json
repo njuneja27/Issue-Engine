@@ -1,0 +1,32 @@
+{
+  "name": "issue-engine",
+  "version": "0.1.0",
+  "description": "Generic GitHub issue orchestration controller for Codex-driven implementation pipelines",
+  "type": "module",
+  "bin": {
+    "issue-engine": "./dist/cli.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "doctor": "tsx src/cli.ts doctor",
+    "init": "tsx src/cli.ts init",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.4.1",
+    "commander": "^14.0.1",
+    "dotenv": "^17.2.1",
+    "minimatch": "^10.0.3",
+    "zod": "^4.1.11"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.7.2",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "summary",
+    "status",
+    "changedFiles",
+    "validationCommands",
+    "followUps"
+  ],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "implemented",
+        "no_changes",
+        "blocked"
+      ]
+    },
+    "changedFiles": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "validationCommands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "followUps": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "summary",
+    "findings",
+    "requiredChanges",
+    "validationGaps"
+  ],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "approved",
+        "revise"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "requiredChanges": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "validationGaps": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

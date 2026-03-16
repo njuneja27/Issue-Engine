@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+coverage/
+*.log
+state/
+logs/
+!logs/.gitkeep
+!logs/runs/.gitkeep
+config/repos/*.local.json
+config/capacity.local.json
