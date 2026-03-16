@@ -192,6 +192,9 @@ export class CodexClient {
     const promptPath = join(options.runDir, `${options.phase}.prompt.md`);
     const responsePath = join(options.runDir, `${options.phase}.response.json`);
     writeTextFile(promptPath, normalizeNewlines(options.prompt));
+    const phaseTag = `codex-${options.phase}`;
+    const stdoutLogger = createPrefixedStreamLogger(this.logger, phaseTag, "stdout");
+    const stderrLogger = createPrefixedStreamLogger(this.logger, phaseTag, "stderr");
 
     if (options.dryRun) {
       writeTextFile(responsePath, formatJson(options.dryRunOutput));
@@ -210,6 +213,7 @@ export class CodexClient {
 
     for (const model of models) {
       try {
+        this.logger.info(`Starting ${options.phase} with model ${model}`);
         const result = await this.runner.run(
           "codex",
           [
@@ -232,8 +236,13 @@ export class CodexClient {
           {
             cwd: options.cwd,
             input: options.prompt,
+            onStdout: stdoutLogger.write,
+            onStderr: stderrLogger.write,
           },
         );
+
+        stdoutLogger.flush();
+        stderrLogger.flush();
 
         if (!existsSync(responsePath)) {
           throw new Error(
@@ -249,6 +258,8 @@ export class CodexClient {
           responsePath,
         };
       } catch (error) {
+        stdoutLogger.flush();
+        stderrLogger.flush();
         lastError = error;
         if (
           model !== models[models.length - 1] &&
@@ -269,6 +280,49 @@ export class CodexClient {
       }`,
     );
   }
+}
+
+function createPrefixedStreamLogger(
+  logger: Logger,
+  phaseTag: string,
+  stream: "stdout" | "stderr",
+): { write: (chunk: string) => void; flush: () => void } {
+  let buffer = "";
+
+  const write = (chunk: string): void => {
+    if (!chunk) {
+      return;
+    }
+
+    buffer += chunk.replace(/\r/g, "");
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+      if (stream === "stderr") {
+        logger.warn(`${phaseTag} stderr: ${trimmed}`);
+      } else {
+        logger.info(`${phaseTag} stdout: ${trimmed}`);
+      }
+    }
+  };
+
+  const flush = (): void => {
+    if (buffer.trim()) {
+      if (stream === "stderr") {
+        logger.warn(`${phaseTag} stderr: ${buffer.trim()}`);
+      } else {
+        logger.info(`${phaseTag} stdout: ${buffer.trim()}`);
+      }
+    }
+    buffer = "";
+  };
+
+  return { write, flush };
 }
 
 function looksLikeModelAvailabilityError(error: unknown): boolean {

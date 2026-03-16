@@ -5,6 +5,8 @@ export interface CommandOptions {
   input?: string;
   env?: NodeJS.ProcessEnv;
   allowFailure?: boolean;
+  onStdout?: ((chunk: string) => void) | undefined;
+  onStderr?: ((chunk: string) => void) | undefined;
 }
 
 export interface CommandResult {
@@ -57,11 +59,15 @@ export class NodeCommandRunner implements CommandRunner {
       let stderr = "";
 
       child.stdout.on("data", (chunk) => {
-        stdout += String(chunk);
+        const text = String(chunk);
+        stdout += text;
+        options.onStdout?.(text);
       });
 
       child.stderr.on("data", (chunk) => {
-        stderr += String(chunk);
+        const text = String(chunk);
+        stderr += text;
+        options.onStderr?.(text);
       });
 
       child.on("error", (error) => {

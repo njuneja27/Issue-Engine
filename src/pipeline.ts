@@ -26,6 +26,7 @@ export interface RunOnceOptions {
   codex: CodexClient;
   dryRun: boolean;
   issueNumber?: number | undefined;
+  runOwner?: string | undefined;
 }
 
 export interface RunOnceResult {
@@ -65,9 +66,10 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
     runner,
     codex,
     dryRun,
+    runOwner,
     runId,
     issue,
-    runOwner: `issue-engine:${process.pid}`,
+    runOwner: runOwner ?? `issue-engine:${process.pid}`,
     requireIssueReady: true,
   });
 }
@@ -88,12 +90,20 @@ export async function runIssue(options: RunIssueOptions): Promise<RunOnceResult>
   } = options;
   const effectiveRunId = runId ?? randomId(`run-${profile.profileName}-issue-${issue.number}`);
   const owner = runOwner ?? `issue-engine:${process.pid}`;
+  const runLabel = `[run ${effectiveRunId}]`;
 
   if (!dryRun) {
     await enforceCapacityForNewWork(appConfig, runner, logger);
   }
 
+  logger.info(
+    `${runLabel} starting ${dryRun ? "dry-run" : "real"} run for issue #${issue.number} in profile ${profile.profileName} (owner=${owner})`,
+  );
+
+  logger.info(`${runLabel} syncing open issues`);
   const issues = await syncOpenIssues(runner, db, profile, logger);
+  logger.info(`${runLabel} synced ${issues.length} open issues`);
+  logger.info(`${runLabel} rebuilding issue graph`);
   const edges = await buildIssueGraph(
     profile,
     issues,
@@ -112,6 +122,7 @@ export async function runIssue(options: RunIssueOptions): Promise<RunOnceResult>
     edges,
     requireIssueReady ?? false,
   );
+  logger.info(`${runLabel} selected issue #${selectedIssue.number}`);
   const runDir = join(appConfig.paths.runLogDir, effectiveRunId);
   ensureDir(runDir);
 
@@ -119,6 +130,7 @@ export async function runIssue(options: RunIssueOptions): Promise<RunOnceResult>
   if (!lockManager.acquire(selectedIssue.number, owner)) {
     throw new Error(`Issue #${selectedIssue.number} is already locked`);
   }
+  logger.info(`${runLabel} lock acquired for issue #${selectedIssue.number}`);
 
   if (runId) {
     const existingRun = db.getRun(runId);
@@ -137,6 +149,7 @@ export async function runIssue(options: RunIssueOptions): Promise<RunOnceResult>
         resumedBy: owner,
       },
     });
+    logger.info(`${runLabel} resumed run ${runId} from ${existingRun.phase}`);
   } else {
     const runRecord: RunRecord = {
       runId: effectiveRunId,
@@ -151,9 +164,11 @@ export async function runIssue(options: RunIssueOptions): Promise<RunOnceResult>
       },
     };
     db.insertRun(runRecord);
+    logger.info(`${runLabel} created run record`);
   }
 
   try {
+    logger.info(`${runLabel} preparing worktree`);
     const validationSummary = renderValidationSummary(profile);
     const worktree = await prepareWorktree(runner, db, profile, selectedIssue, logger, dryRun);
     db.updateRun(effectiveRunId, {
@@ -163,8 +178,12 @@ export async function runIssue(options: RunIssueOptions): Promise<RunOnceResult>
         reusedWorktree: worktree.reused,
       },
     });
+    logger.info(
+      `${runLabel} worktree ready at ${worktree.path} (${worktree.reused ? "reused" : "new"})`,
+    );
     lockManager.heartbeat(selectedIssue.number, owner);
 
+    logger.info(`${runLabel} entering planner phase`);
     const plannerPrompt = buildPlannerPrompt(
       appConfig,
       profile,
@@ -189,6 +208,7 @@ export async function runIssue(options: RunIssueOptions): Promise<RunOnceResult>
     });
     lockManager.heartbeat(selectedIssue.number, owner);
 
+    logger.info(`${runLabel} entering review phase`);
     const reviewerPrompt = buildReviewerPrompt(
       appConfig,
       profile,
@@ -214,6 +234,7 @@ export async function runIssue(options: RunIssueOptions): Promise<RunOnceResult>
     });
     lockManager.heartbeat(selectedIssue.number, owner);
 
+    logger.info(`${runLabel} entering implementation phase`);
     const implementerPrompt = buildImplementerPrompt(
       appConfig,
       profile,
@@ -229,11 +250,17 @@ export async function runIssue(options: RunIssueOptions): Promise<RunOnceResult>
       dryRun ? appConfig.paths.rootDir : worktree.path,
       dryRun,
     );
+    logger.info(
+      `${runLabel} implementation completed with status ${implementer.output.status} (${implementer.output.changedFiles.length} changed file(s))`,
+    );
 
     const changedPaths = dryRun
       ? implementer.output.changedFiles
       : await listChangedPaths(runner, worktree.path);
     const validationCommands = selectValidationCommands(profile, changedPaths);
+    logger.info(
+      `${runLabel} running validation (${validationCommands.length} command(s)) on ${changedPaths.length} changed path(s)`,
+    );
     const validationResults = await runValidationCommands(
       runner,
       profile,
@@ -243,6 +270,7 @@ export async function runIssue(options: RunIssueOptions): Promise<RunOnceResult>
       dryRun,
     );
 
+    logger.info(`${runLabel} committing/pushing changes if needed`);
     const commitResult = await commitAndPush(
       runner,
       profile,
@@ -255,6 +283,7 @@ export async function runIssue(options: RunIssueOptions): Promise<RunOnceResult>
 
     let pr: PullRequestRecord | undefined;
     if (dryRun || commitResult.changedPaths.length > 0 || implementer.output.status === "implemented") {
+      logger.info(`${runLabel} creating/updating draft PR`);
       pr = await createDraftPr(
         runner,
         profile,
@@ -269,6 +298,8 @@ export async function runIssue(options: RunIssueOptions): Promise<RunOnceResult>
       if (pr) {
         db.upsertPr(pr);
       }
+    } else {
+      logger.info(`${runLabel} no PR created (no changes and no implementer output)`);
     }
 
     db.updateRun(effectiveRunId, {
@@ -284,6 +315,11 @@ export async function runIssue(options: RunIssueOptions): Promise<RunOnceResult>
         prUrl: pr?.url,
       },
     });
+    logger.info(
+      `${runLabel} completed successfully for issue #${selectedIssue.number}${
+        pr ? ` with PR ${pr.url}` : ""
+      }`,
+    );
 
     return {
       runId: effectiveRunId,
@@ -302,9 +338,15 @@ export async function runIssue(options: RunIssueOptions): Promise<RunOnceResult>
         error: error instanceof Error ? error.message : String(error),
       },
     });
+    logger.warn(
+      `${runLabel} failed for issue #${selectedIssue.number}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
     throw error;
   } finally {
     lockManager.release(selectedIssue.number, owner);
+    logger.info(`${runLabel} lock released`);
   }
 }
 

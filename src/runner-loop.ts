@@ -99,6 +99,9 @@ async function runWorkerIteration(
     issueNumber: options.issueNumber,
   });
   if (queuedRepair) {
+    options.logger.info(
+      `Worker ${workerId} picked queued repair run ${queuedRepair.runId} for issue #${queuedRepair.issueNumber}`,
+    );
     return runQueuedWorkWithRetry(workerId, options, queuedRepair, signal);
   }
 
@@ -107,11 +110,17 @@ async function runWorkerIteration(
       issueNumber: options.issueNumber,
     });
     if (queuedForIssue) {
+      options.logger.info(
+        `Worker ${workerId} picked queued run ${queuedForIssue.runId} for issue #${queuedForIssue.issueNumber}`,
+      );
       return runQueuedWorkWithRetry(workerId, options, queuedForIssue, signal);
     }
   } else {
     const queuedRun = options.db.claimQueuedRun(options.profile.profileName);
     if (queuedRun) {
+      options.logger.info(
+        `Worker ${workerId} picked queued run ${queuedRun.runId} for issue #${queuedRun.issueNumber}`,
+      );
       return runQueuedWorkWithRetry(workerId, options, queuedRun, signal);
     }
   }
@@ -128,7 +137,7 @@ async function runSpecificIssue(
   options: RunWorkerOptions,
 ): Promise<IterationResult> {
   try {
-    await runOnce({
+    const result = await runOnce({
       profile: options.profile,
       appConfig: options.appConfig,
       db: options.db,
@@ -137,7 +146,9 @@ async function runSpecificIssue(
       codex: options.codex,
       issueNumber: options.issueNumber,
       dryRun: options.dryRun,
+      runOwner: `worker-${workerId}:${process.pid}`,
     });
+    options.logger.info(`Worker ${workerId} started run ${result.runId} for issue #${result.issue.number}`);
     return { didWork: true, waitMs: 0 };
   } catch (error) {
     const waitMs = classifyRetryDelayMs(error, options.intervalMs);
@@ -153,7 +164,7 @@ async function runSpecificIssue(
 
 async function runNextReadyIssue(workerId: number, options: RunWorkerOptions): Promise<IterationResult> {
   try {
-    await runOnce({
+    const result = await runOnce({
       profile: options.profile,
       appConfig: options.appConfig,
       db: options.db,
@@ -161,7 +172,9 @@ async function runNextReadyIssue(workerId: number, options: RunWorkerOptions): P
       runner: options.runner,
       codex: options.codex,
       dryRun: options.dryRun,
+      runOwner: `worker-${workerId}:${process.pid}`,
     });
+    options.logger.info(`Worker ${workerId} started run ${result.runId} for issue #${result.issue.number}`);
     return { didWork: true, waitMs: 0 };
   } catch (error) {
     const waitMs = classifyRetryDelayMs(error, options.intervalMs);
@@ -210,6 +223,24 @@ async function executeQueuedRun(context: {
   signal: AbortSignal;
 }): Promise<void> {
   const issue = context.options.db.getIssue(context.options.profile.profileName, context.queuedRun.issueNumber);
+  if (context.signal.aborted) {
+    context.options.logger.debug(
+      `Worker ${context.workerId} queued run ${context.queuedRun.runId} aborted before start`,
+    );
+    context.options.db.updateRun(context.queuedRun.runId, {
+      status: "failed",
+      endedAt: nowIso(),
+      metadata: {
+        error: "Execution aborted before queued run started",
+      },
+    });
+    return;
+  }
+
+  context.options.logger.info(
+    `Worker ${context.workerId}: starting queued run ${context.queuedRun.runId} for issue #${context.queuedRun.issueNumber}`,
+  );
+
   if (!issue || issue.state !== "OPEN") {
     context.options.db.updateRun(context.queuedRun.runId, {
       status: "failed",
@@ -221,17 +252,6 @@ async function executeQueuedRun(context: {
     context.options.logger.warn(
       `Worker ${context.workerId}: queued run ${context.queuedRun.runId} failed; issue #${context.queuedRun.issueNumber} unavailable`,
     );
-    return;
-  }
-
-  if (context.signal.aborted) {
-    context.options.db.updateRun(context.queuedRun.runId, {
-      status: "failed",
-      endedAt: nowIso(),
-      metadata: {
-        error: "Execution aborted before queued run started",
-      },
-    });
     return;
   }
 
