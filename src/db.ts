@@ -502,6 +502,78 @@ export class StateDatabase {
     return rows.map(mapRun);
   }
 
+  getRunningRuns(profileName: string): RunRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM runs
+          WHERE profile_name = ?
+            AND status = 'running'
+          ORDER BY started_at ASC`,
+      )
+      .all(profileName) as RunRow[];
+    return rows.map(mapRun);
+  }
+
+  claimQueuedRun(
+    profileName: string,
+    options: { phase?: RunPhase; issueNumber?: number; now?: string } = {},
+  ): RunRecord | undefined {
+    const now = options.now ?? nowIso();
+    const tx = this.db.transaction(() => {
+      const whereClauses = [
+        "profile_name = ?",
+        "status = 'queued'",
+        "issue_number NOT IN (SELECT issue_number FROM locks WHERE profile_name = ? AND lease_expires_at > ?)",
+        "issue_number NOT IN (SELECT issue_number FROM runs WHERE profile_name = ? AND status = 'running')",
+      ];
+      const params: Array<string | number> = [profileName, profileName, now, profileName];
+
+      if (options.phase !== undefined) {
+        whereClauses.push("phase = ?");
+        params.push(options.phase);
+      }
+
+      if (options.issueNumber !== undefined) {
+        whereClauses.push("issue_number = ?");
+        params.push(options.issueNumber);
+      }
+
+      const where = whereClauses.join(" AND ");
+      const queuedRun = this.db
+        .prepare(
+          `SELECT * FROM runs
+           WHERE ${where}
+           ORDER BY started_at ASC
+           LIMIT 1`,
+        )
+        .get(...params) as RunRow | undefined;
+
+      if (!queuedRun) {
+        return undefined;
+      }
+
+      const update = this.db.prepare(
+        `UPDATE runs
+           SET status = 'running'
+           WHERE run_id = ?
+             AND status = 'queued'`,
+      );
+      const result = update.run(queuedRun.run_id);
+      if (result.changes === 0) {
+        return undefined;
+      }
+
+      const claimed = this.getRun(queuedRun.run_id);
+      if (!claimed) {
+        return undefined;
+      }
+
+      return claimed;
+    });
+
+    return tx();
+  }
+
   getIssueRuns(profileName: string, issueNumber: number): RunRecord[] {
     const rows = this.db
       .prepare(

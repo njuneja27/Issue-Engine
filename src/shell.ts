@@ -16,6 +16,13 @@ export interface CommandResult {
   exitCode: number;
 }
 
+export class MissingCommandError extends Error {
+  constructor(command: string) {
+    super(`Missing required command: ${command}. Install it and ensure it is on your PATH.`);
+    this.name = "MissingCommandError";
+  }
+}
+
 export interface CommandRunner {
   run(command: string, args: string[], options?: CommandOptions): Promise<CommandResult>;
 }
@@ -57,7 +64,16 @@ export class NodeCommandRunner implements CommandRunner {
         stderr += String(chunk);
       });
 
-      child.on("error", reject);
+      child.on("error", (error) => {
+        if (
+          (error as NodeJS.ErrnoException).code === "ENOENT"
+        ) {
+          reject(new MissingCommandError(command));
+          return;
+        }
+
+        reject(error);
+      });
 
       child.on("close", (code) => {
         const result: CommandResult = {

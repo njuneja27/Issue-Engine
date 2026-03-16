@@ -12,7 +12,7 @@ import { commitAndPush, createDraftPr, listChangedPaths } from "./prs.js";
 import type { CommandRunner } from "./shell.js";
 import { listReadyIssues, nextReadyIssue } from "./scheduler.js";
 import type { CodexClient } from "./codex.js";
-import type { GitHubIssue, PullRequestRecord, RepoProfile, RunRecord } from "./types.js";
+import type { GitHubIssue, IssueEdge, PullRequestRecord, RepoProfile, RunRecord } from "./types.js";
 import { selectValidationCommands, runValidationCommands } from "./validation.js";
 import { prepareWorktree } from "./worktrees.js";
 import { ensureDir, nowIso, randomId } from "./utils.js";
@@ -38,8 +38,56 @@ export interface RunOnceResult {
   validationResults: Array<{ name: string; command: string; status: "passed" | "failed" | "skipped" }>;
 }
 
+export interface RunIssueOptions {
+  profile: RepoProfile;
+  appConfig: AppConfig;
+  db: StateDatabase;
+  logger: Logger;
+  runner: CommandRunner;
+  codex: CodexClient;
+  issue: GitHubIssue;
+  dryRun: boolean;
+  runId?: string | undefined;
+  runOwner?: string | undefined;
+  requireIssueReady?: boolean | undefined;
+}
+
 export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   const { profile, appConfig, db, logger, runner, codex, dryRun } = options;
+  const issue = selectIssue(db, profile, options.issueNumber);
+  const runId = randomId(`run-${options.profile.profileName}-issue-${issue.number}`);
+
+  return runIssue({
+    profile,
+    appConfig,
+    db,
+    logger,
+    runner,
+    codex,
+    dryRun,
+    runId,
+    issue,
+    runOwner: `issue-engine:${process.pid}`,
+    requireIssueReady: true,
+  });
+}
+
+export async function runIssue(options: RunIssueOptions): Promise<RunOnceResult> {
+  const {
+    profile,
+    appConfig,
+    db,
+    logger,
+    runner,
+    codex,
+    issue,
+    dryRun,
+    runId,
+    runOwner,
+    requireIssueReady,
+  } = options;
+  const effectiveRunId = runId ?? randomId(`run-${profile.profileName}-issue-${issue.number}`);
+  const owner = runOwner ?? `issue-engine:${process.pid}`;
 
   if (!dryRun) {
     await enforceCapacityForNewWork(appConfig, runner, logger);
@@ -56,45 +104,71 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   );
   db.replaceIssueEdges(profile.profileName, edges);
 
-  const issue = selectIssue(db, profile, options.issueNumber);
-  const runId = randomId(`run-${profile.profileName}-issue-${issue.number}`);
-  const owner = `issue-engine:${process.pid}`;
-  const runDir = join(appConfig.paths.runLogDir, runId);
+  const selectedIssue = selectIssue(
+    db,
+    profile,
+    issue.number,
+    issues,
+    edges,
+    requireIssueReady ?? false,
+  );
+  const runDir = join(appConfig.paths.runLogDir, effectiveRunId);
   ensureDir(runDir);
 
   const lockManager = createLockManager(db, profile.profileName, appConfig.defaultLockLeaseMs);
-  if (!lockManager.acquire(issue.number, owner)) {
-    throw new Error(`Issue #${issue.number} is already locked`);
+  if (!lockManager.acquire(selectedIssue.number, owner)) {
+    throw new Error(`Issue #${selectedIssue.number} is already locked`);
   }
 
-  const runRecord: RunRecord = {
-    runId,
-    profileName: profile.profileName,
-    issueNumber: issue.number,
-    phase: "planning",
-    status: "running",
-    dryRun,
-    startedAt: nowIso(),
-    metadata: {},
-  };
-  db.insertRun(runRecord);
+  if (runId) {
+    const existingRun = db.getRun(runId);
+    if (!existingRun) {
+      throw new Error(`Run ${runId} not found`);
+    }
+
+    db.updateRun(runId, {
+      status: "running",
+      phase: "planning",
+      dryRun,
+      startedAt: existingRun.startedAt,
+      metadata: {
+        ...(existingRun.metadata ?? {}),
+        queuedPhase: existingRun.phase,
+        resumedBy: owner,
+      },
+    });
+  } else {
+    const runRecord: RunRecord = {
+      runId: effectiveRunId,
+      profileName: profile.profileName,
+      issueNumber: selectedIssue.number,
+      phase: "planning",
+      status: "running",
+      dryRun,
+      startedAt: nowIso(),
+      metadata: {
+        runOwner: owner,
+      },
+    };
+    db.insertRun(runRecord);
+  }
 
   try {
     const validationSummary = renderValidationSummary(profile);
-    const worktree = await prepareWorktree(runner, db, profile, issue, logger, dryRun);
-    db.updateRun(runId, {
-      branchName: worktree.branchName,
+    const worktree = await prepareWorktree(runner, db, profile, selectedIssue, logger, dryRun);
+    db.updateRun(effectiveRunId, {
+      phase: "planning",
       worktreePath: worktree.path,
       metadata: {
         reusedWorktree: worktree.reused,
       },
     });
-    lockManager.heartbeat(issue.number, owner);
+    lockManager.heartbeat(selectedIssue.number, owner);
 
     const plannerPrompt = buildPlannerPrompt(
       appConfig,
       profile,
-      issue,
+      selectedIssue,
       worktree.branchName,
       validationSummary,
     );
@@ -105,7 +179,7 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
       dryRun ? appConfig.paths.rootDir : worktree.path,
       dryRun,
     );
-    db.updateRun(runId, {
+    db.updateRun(effectiveRunId, {
       phase: "review",
       metadata: {
         plannerModel: planner.modelUsed,
@@ -113,12 +187,12 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
         plannerResponsePath: planner.responsePath,
       },
     });
-    lockManager.heartbeat(issue.number, owner);
+    lockManager.heartbeat(selectedIssue.number, owner);
 
     const reviewerPrompt = buildReviewerPrompt(
       appConfig,
       profile,
-      issue,
+      selectedIssue,
       planner.output,
       validationSummary,
     );
@@ -130,7 +204,7 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
       dryRun,
     );
     const reconciledPlan = codex.reconcilePlan(planner.output, reviewer.output);
-    db.updateRun(runId, {
+    db.updateRun(effectiveRunId, {
       phase: "implementation",
       metadata: {
         plannerModel: planner.modelUsed,
@@ -138,12 +212,12 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
         reviewerResponsePath: reviewer.responsePath,
       },
     });
-    lockManager.heartbeat(issue.number, owner);
+    lockManager.heartbeat(selectedIssue.number, owner);
 
     const implementerPrompt = buildImplementerPrompt(
       appConfig,
       profile,
-      issue,
+      selectedIssue,
       worktree.branchName,
       reconciledPlan,
       validationSummary,
@@ -172,7 +246,7 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
     const commitResult = await commitAndPush(
       runner,
       profile,
-      issue,
+      selectedIssue,
       worktree.path,
       worktree.branchName,
       logger,
@@ -184,8 +258,8 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
       pr = await createDraftPr(
         runner,
         profile,
-        issue,
-        runId,
+        selectedIssue,
+        effectiveRunId,
         worktree.branchName,
         worktree.path,
         runDir,
@@ -197,7 +271,7 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
       }
     }
 
-    db.updateRun(runId, {
+    db.updateRun(effectiveRunId, {
       phase: "implementation",
       status: "succeeded",
       endedAt: nowIso(),
@@ -212,8 +286,8 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
     });
 
     return {
-      runId,
-      issue,
+      runId: effectiveRunId,
+      issue: selectedIssue,
       branchName: worktree.branchName,
       worktreePath: worktree.path,
       pr,
@@ -221,7 +295,7 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
       validationResults,
     };
   } catch (error) {
-    db.updateRun(runId, {
+    db.updateRun(effectiveRunId, {
       status: "failed",
       endedAt: nowIso(),
       metadata: {
@@ -230,7 +304,7 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
     });
     throw error;
   } finally {
-    lockManager.release(issue.number, owner);
+    lockManager.release(selectedIssue.number, owner);
   }
 }
 
@@ -238,6 +312,9 @@ function selectIssue(
   db: StateDatabase,
   profile: RepoProfile,
   requestedIssueNumber?: number,
+  issues?: GitHubIssue[],
+  edges?: IssueEdge[],
+  requireReady = true,
 ): GitHubIssue {
   if (requestedIssueNumber !== undefined) {
     const requested = db.getIssue(profile.profileName, requestedIssueNumber);
@@ -245,8 +322,12 @@ function selectIssue(
       throw new Error(`Issue #${requestedIssueNumber} is not open in local state`);
     }
 
-    const issues = db.getIssues(profile.profileName, "OPEN");
-    const edges = db.getIssueEdges(profile.profileName);
+    if (!requireReady) {
+      return requested;
+    }
+
+    const openIssues = issues ?? db.getIssues(profile.profileName, "OPEN");
+    const parsedEdges = edges ?? db.getIssueEdges(profile.profileName);
     const activeIssueNumbers = new Set(
       db.getActiveRuns(profile.profileName).map((run) => run.issueNumber),
     );
@@ -255,8 +336,8 @@ function selectIssue(
     );
     const ready = listReadyIssues(
       profile,
-      issues,
-      edges,
+      openIssues,
+      parsedEdges,
       activeIssueNumbers,
       lockedIssueNumbers,
     );

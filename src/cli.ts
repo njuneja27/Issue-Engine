@@ -13,6 +13,7 @@ import { runOnce } from "./pipeline.js";
 import { NodeCommandRunner } from "./shell.js";
 import { listReadyIssues, nextReadyIssue } from "./scheduler.js";
 import { watchPullRequests } from "./watchers.js";
+import { runWorkerLoop } from "./runner-loop.js";
 
 const program = new Command();
 program
@@ -278,6 +279,55 @@ program
   });
 
 program
+  .command("run-worker")
+  .requiredOption("--profile <name>", "Repo profile name")
+  .option("--interval-ms <milliseconds>", "Polling interval in milliseconds", parseInteger, 30_000)
+  .option("--parallel <n>", "Number of in-process workers", parseInteger, 1)
+  .option("--max-runs <n>", "Stop after this many runs (optional)", parseInteger)
+  .option("--issue <number>", "Specific issue number")
+  .option("--dry-run", "Do not mutate any target repo state", false)
+  .description("Run queued work and continuously process ready issues")
+  .action(async (options: { profile: string; intervalMs: number; parallel: number; maxRuns?: number; issue?: number; dryRun: boolean }) => {
+    if (options.intervalMs <= 0) {
+      throw new Error("interval-ms must be greater than 0");
+    }
+    if (options.parallel <= 0) {
+      throw new Error("parallel must be greater than 0");
+    }
+    if (options.maxRuns !== undefined && options.maxRuns <= 0) {
+      throw new Error("max-runs must be greater than 0");
+    }
+
+    const context = createCommandContext(options.profile);
+    const stopController = new AbortController();
+    const onStop = (signal: string): void => {
+      context.logger.warn(`Received ${signal}; shutting down worker loop`);
+      stopController.abort();
+    };
+    process.once("SIGINT", () => onStop("SIGINT"));
+    process.once("SIGTERM", () => onStop("SIGTERM"));
+
+    try {
+      await runWorkerLoop({
+        profile: context.profile,
+        appConfig: context.appConfig,
+        db: context.db,
+        logger: context.logger,
+        runner: context.runner,
+        codex: context.codex,
+        intervalMs: options.intervalMs,
+        parallel: options.parallel,
+        maxRuns: options.maxRuns,
+        issueNumber: options.issue,
+        dryRun: options.dryRun,
+        stopSignal: stopController.signal,
+      });
+    } finally {
+      context.db.close();
+    }
+  });
+
+program
   .command("release-lock")
   .requiredOption("--profile <name>", "Repo profile name")
   .requiredOption("--issue <number>", "Issue number", parseInteger)
@@ -322,7 +372,14 @@ program
     }
   });
 
-program.parseAsync(process.argv);
+program.parseAsync(process.argv).catch((error: unknown) => {
+  if (error instanceof Error) {
+    console.error(error.message);
+  } else {
+    console.error(String(error));
+  }
+  process.exitCode = 1;
+});
 
 function createCommandContext(profileName: string) {
   const appConfig = loadAppConfig();

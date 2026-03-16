@@ -209,6 +209,7 @@ function queueRepairRunIfNeeded(
     startedAt: nowIso(),
     metadata: {
       reason: "Queued by PR watcher",
+      source: "watch-prs",
     },
   };
 

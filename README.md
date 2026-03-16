@@ -127,10 +127,31 @@ npx tsx src/cli.ts build-graph --profile <name>
 npx tsx src/cli.ts list-ready --profile <name>
 npx tsx src/cli.ts claim-next --profile <name>
 npx tsx src/cli.ts run-once --profile <name> [--issue 123] [--dry-run]
+npx tsx src/cli.ts run-worker --profile <name> [--issue 123] [--interval-ms 30000] [--parallel 1] [--max-runs N] [--dry-run]
 npx tsx src/cli.ts watch-prs --profile <name>
 npx tsx src/cli.ts release-lock --profile <name> --issue 123
 npx tsx src/cli.ts show-issue --profile <name> --issue 123
 ```
+
+`run-worker` runs continuously in a poll loop and supports multiple in-process workers:
+
+- Claims queued runs first, with `repair` phase runs prioritized first.
+- Falls back to ready-issue scheduling once the queue is empty.
+- Honors profile-level concurrency and lock semantics before claiming each work item.
+- Respects `--issue` for single-issue mode.
+- Stops on `SIGINT`/`SIGTERM` or when `--max-runs` is reached.
+- Multiple workers for the same profile are allowed, but all workers share the same DB-backed lock and capacity checks, so only valid unique issue work can proceed.
+
+Defaults:
+
+- `--interval-ms`: `30000`
+- `--parallel`: `1`
+- `--max-runs`: unlimited when omitted
+
+Notes:
+
+- `watch-prs` continues to enqueue `repair` runs; `run-worker` is now the execution side for queued runs.
+- `run-once` remains manual/single-shot and still starts at most one run per invocation.
 
 Package scripts:
 
