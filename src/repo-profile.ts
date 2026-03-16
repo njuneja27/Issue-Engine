@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { commandInputSchema } from "./command-config.js";
 
 const modelPolicySchema = z.object({
   primary: z.string().min(1),
@@ -8,7 +9,7 @@ const modelPolicySchema = z.object({
 
 const validationCommandSchema = z.object({
   name: z.string().min(1),
-  command: z.string().min(1),
+  command: commandInputSchema,
   optional: z.boolean().optional(),
 });
 
@@ -43,6 +44,11 @@ export const repoProfileSchema = z.object({
     title: z.string().min(1),
     body: z.string().min(1),
   }),
+  codex: z
+    .object({
+      allowBypassApprovalsAndSandbox: z.boolean().optional(),
+    })
+    .optional(),
   models: z.object({
     planning: modelPolicySchema,
     review: modelPolicySchema,

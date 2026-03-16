@@ -56,7 +56,14 @@
     "base": [
       {
         "name": "quick test",
-        "command": "npm test -- --runInBand"
+        "command": {
+          "command": "npm",
+          "args": [
+            "test",
+            "--",
+            "--runInBand"
+          ]
+        }
       }
     ],
     "pathRules": [
@@ -68,7 +75,13 @@
         "commands": [
           {
             "name": "build",
-            "command": "npm run build"
+            "command": {
+              "command": "npm",
+              "args": [
+                "run",
+                "build"
+              ]
+            }
           }
         ]
       },
@@ -79,7 +92,13 @@
         "commands": [
           {
             "name": "docs lint",
-            "command": "npm run lint:docs",
+            "command": {
+              "command": "npm",
+              "args": [
+                "run",
+                "lint:docs"
+              ]
+            },
             "optional": true
           }
         ]
@@ -110,5 +129,8 @@
     "confidenceThreshold": 0.9,
     "model": "gpt-5.4",
     "reasoningEffort": "xhigh"
+  },
+  "codex": {
+    "allowBypassApprovalsAndSandbox": false
   }
 }

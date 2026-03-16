@@ -56,8 +56,8 @@ Context:
       };
 
       const runner = new FakeRunner({
-        sh: (args, options) => ({
-          command: "sh",
+        "codex login status": (args, options) => ({
+          command: "codex",
           args,
           cwd: options?.cwd ?? process.cwd(),
           stdout: `Context:
@@ -93,8 +93,8 @@ Context:
       };
 
       const runner = new FakeRunner({
-        sh: (args, options) => ({
-          command: "sh",
+        "codex login status": (args, options) => ({
+          command: "codex",
           args,
           cwd: options?.cwd ?? process.cwd(),
           stdout: "Logged in using ChatGPT",
@@ -106,6 +106,53 @@ Context:
       const status = await getCapacityStatus(appConfig, runner);
       expect(status.available).toBe(false);
       expect(status.shouldBlockNewWork).toBe(false);
+    } finally {
+      removeTempRoot(root);
+    }
+  });
+
+  test("supports structured capacity commands through command+args form", async () => {
+    const root = makeTempRoot("issue-engine-capacity-structured-");
+
+    try {
+      const appConfig = makeTestAppConfig(root);
+      appConfig.capacityCheck = {
+        enabled: true,
+        command: {
+          command: "codex",
+          args: ["login", "status"],
+        },
+        minRemainingPercent: 5,
+        blockNewWork: true,
+        failOpen: false,
+        windowLabel: "7d",
+      };
+
+      const runner = new FakeRunner({
+        "codex login status": (args, options) => {
+          expect(args).toEqual(["login", "status"]);
+          return {
+            command: "codex",
+            args,
+            cwd: options?.cwd ?? process.cwd(),
+            stdout: "7d limit:\n80% remaining",
+            stderr: "",
+            exitCode: 0,
+          };
+        },
+      });
+
+      const status = await getCapacityStatus(appConfig, runner);
+
+      expect(status.available).toBe(true);
+      expect(status.shouldBlockNewWork).toBe(false);
+      expect(runner.calls).toEqual([
+        {
+          command: "codex",
+          args: ["login", "status"],
+          cwd: root,
+        },
+      ]);
     } finally {
       removeTempRoot(root);
     }

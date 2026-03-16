@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { config as loadDotenv } from "dotenv";
 
 import { capacityCheckSchema } from "./capacity-config.js";
+import { type CapacityCheckConfigInput } from "./capacity-config.js";
 import { repoProfileSchema } from "./repo-profile.js";
 import type { RepoProfile } from "./types.js";
 import { ensureDir } from "./utils.js";
@@ -28,7 +29,7 @@ export interface AppConfig {
   logLevel: "debug" | "info" | "warn" | "error";
   capacityCheck?: {
     enabled: boolean;
-    command: string;
+    command: CapacityCheckConfigInput["command"];
     cwd?: string | undefined;
     minRemainingPercent: number;
     blockNewWork?: boolean | undefined;

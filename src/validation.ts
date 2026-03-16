@@ -3,6 +3,11 @@ import { join } from "node:path";
 
 import { minimatch } from "minimatch";
 
+import {
+  commandFingerprint,
+  commandToString,
+  parseCommandInput,
+} from "./command-config.js";
 import type { CommandRunner } from "./shell.js";
 import type { Logger } from "./logging.js";
 import type { RepoProfile, ValidationCommand } from "./types.js";
@@ -14,7 +19,7 @@ export function selectValidationCommands(
   const selected = new Map<string, ValidationCommand>();
 
   for (const command of profile.validation.base) {
-    selected.set(command.command, command);
+    selected.set(commandFingerprint(command.command), command);
   }
 
   for (const rule of profile.validation.pathRules ?? []) {
@@ -27,7 +32,7 @@ export function selectValidationCommands(
     }
 
     for (const command of rule.commands) {
-      selected.set(command.command, command);
+      selected.set(commandFingerprint(command.command), command);
     }
   }
 
@@ -76,30 +81,35 @@ export async function runValidationCommands(
 
   for (const command of commands) {
     if (dryRun) {
-      logger.info(`[dry-run] Would run validation command: ${command.command}`);
+      logger.info(
+        `[dry-run] Would run validation command: ${commandToString(command.command)}`,
+      );
+      const commandString = commandToString(command.command);
       results.push({
         name: command.name,
-        command: command.command,
+        command: commandString,
         status: "skipped",
       });
       continue;
     }
 
     try {
-      await runner.run("sh", ["-lc", command.command], { cwd: worktreePath });
+      const parsedCommand = parseCommandInput(command.command);
+      await runner.run(parsedCommand.command, parsedCommand.args, { cwd: worktreePath });
+      const commandString = commandToString(command.command);
       results.push({
         name: command.name,
-        command: command.command,
+        command: commandString,
         status: "passed",
       });
     } catch (error) {
       if (command.optional) {
         logger.warn(
-          `Optional validation command failed for ${profile.profileName}: ${command.command}`,
+          `Optional validation command failed for ${profile.profileName}: ${commandToString(command.command)}`,
         );
         results.push({
           name: command.name,
-          command: command.command,
+          command: commandToString(command.command),
           status: "failed",
         });
         continue;
