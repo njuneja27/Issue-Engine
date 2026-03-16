@@ -55,10 +55,10 @@ export interface RunIssueOptions {
 }
 
 export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
-  const { profile, appConfig, db, logger, runner, codex, dryRun } = options;
+  const { profile, appConfig, db, logger, runner, codex, dryRun, runOwner } = options;
   const issues = await syncOpenIssues(runner, db, profile, logger);
-  const issue = selectIssue(db, profile, options.issueNumber, issues);
-  const owner = `issue-engine:${process.pid}`;
+  const selectedIssue = selectIssue(db, profile, options.issueNumber, issues);
+  const owner = runOwner ?? `issue-engine:${process.pid}`;
 
   return runIssue({
     profile,
@@ -69,7 +69,7 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
     codex,
     issues,
     dryRun,
-    issue,
+    issue: selectedIssue,
     runOwner: owner,
     requireIssueReady: true,
   });
