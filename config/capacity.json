@@ -1,6 +1,12 @@
 {
   "enabled": false,
-  "command": "codex login status",
+  "command": {
+    "command": "codex",
+    "args": [
+      "login",
+      "status"
+    ]
+  },
   "minRemainingPercent": 5,
   "blockNewWork": true,
   "failOpen": true,

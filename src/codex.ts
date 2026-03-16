@@ -228,9 +228,16 @@ export class CodexClient {
     }
 
     const policy = options.policyOverride ?? options.profile.models[options.phase];
+    const allowBypass = options.profile.codex?.allowBypassApprovalsAndSandbox === true;
     const models = [policy.primary, ...(policy.fallbacks ?? [])];
     const schemaPath = join(this.appConfig.paths.schemasDir, options.schemaFile);
     let lastError: unknown;
+
+    if (allowBypass) {
+      this.logger.warn(
+        `Running ${options.phase} with codex sandbox bypass enabled for profile ${options.profile.profileName}. This disables approvals and sandbox protections.`,
+      );
+    }
 
     for (const model of models) {
       try {
@@ -243,7 +250,9 @@ export class CodexClient {
             model,
             "-c",
             `model_reasoning_effort="${policy.reasoningEffort}"`,
-            "--dangerously-bypass-approvals-and-sandbox",
+            ...(allowBypass
+              ? ["--dangerously-bypass-approvals-and-sandbox"]
+              : []),
             "-C",
             options.cwd,
             "--output-schema",

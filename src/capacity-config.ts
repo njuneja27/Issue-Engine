@@ -1,8 +1,9 @@
 import { z } from "zod";
+import { commandInputSchema, type CommandInput } from "./command-config.js";
 
 export const capacityCheckSchema = z.object({
   enabled: z.boolean(),
-  command: z.string().min(1),
+  command: commandInputSchema,
   cwd: z.string().min(1).optional(),
   minRemainingPercent: z.number().min(0).max(100),
   blockNewWork: z.boolean().optional(),
@@ -13,3 +14,4 @@ export const capacityCheckSchema = z.object({
 });
 
 export type CapacityCheckConfigInput = z.input<typeof capacityCheckSchema>;
+export type CapacityCheckCommand = CommandInput;

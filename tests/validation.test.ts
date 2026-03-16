@@ -43,9 +43,9 @@ describe("runValidationCommands", () => {
           stderr: "",
           exitCode: 0,
         }),
-        "sh -lc npm test": () => ({
-          command: "sh",
-          args: ["-lc", "npm test"],
+        "npm test": () => ({
+          command: "npm",
+          args: ["test"],
           cwd: worktreePath,
           stdout: "",
           stderr: "",
@@ -59,7 +59,7 @@ describe("runValidationCommands", () => {
 
       expect(runner.calls.map((item) => item.args.join(" "))).toEqual([
         "-lc npm ci",
-        "-lc npm test",
+        "test",
       ]);
       expect(logs).toContain(
         `Running npm ci in ${worktreePath} before validation commands`,
@@ -87,9 +87,9 @@ describe("runValidationCommands", () => {
 
       const profile = makeProfile();
       const runner = new FakeRunner({
-        "sh -lc npm test": () => ({
-          command: "sh",
-          args: ["-lc", "npm test"],
+        "npm test": () => ({
+          command: "npm",
+          args: ["test"],
           cwd: worktreePath,
           stdout: "",
           stderr: "",
@@ -102,7 +102,7 @@ describe("runValidationCommands", () => {
       ], logger, false);
 
       expect(runner.calls.map((item) => item.args.join(" "))).toEqual([
-        "-lc npm test",
+        "test",
       ]);
       expect(logs).toContain(
         "Dependency bootstrap skipped: node_modules/.package-lock.json is present",
@@ -150,9 +150,9 @@ describe("runValidationCommands", () => {
 
       const profile = makeProfile();
       const runner = new FakeRunner({
-        "sh -lc npm test": () => ({
-          command: "sh",
-          args: ["-lc", "npm test"],
+        "npm test": () => ({
+          command: "npm",
+          args: ["test"],
           cwd: worktreePath,
           stdout: "",
           stderr: "",
@@ -165,7 +165,7 @@ describe("runValidationCommands", () => {
           { name: "test", command: "npm test" },
         ], logger, false);
 
-        expect(runner.calls.map((item) => item.args.join(" "))).toEqual(["-lc npm test"]);
+        expect(runner.calls.map((item) => item.args.join(" "))).toEqual(["test"]);
         expect(logs).toContain(
           "Dependency bootstrap skipped: ISSUE_ENGINE_SKIP_NODE_INSTALL=true",
         );
@@ -204,12 +204,12 @@ describe("runValidationCommands", () => {
           stderr: "",
           exitCode: 0,
         }),
-        "sh -lc npm test": () => {
+        "npm test": () => {
           throw new Error("validation failed");
         },
-        "sh -lc npm run build": () => ({
-          command: "sh",
-          args: ["-lc", "npm run build"],
+        "npm run build": () => ({
+          command: "npm",
+          args: ["run", "build"],
           cwd: worktreePath,
           stdout: "",
           stderr: "",
@@ -227,8 +227,8 @@ describe("runValidationCommands", () => {
       );
       expect(runner.calls.map((item) => item.args.join(" "))).toEqual([
         "-lc npm ci",
-        "-lc npm test",
-        "-lc npm run build",
+        "test",
+        "run build",
       ]);
       expect(result).toEqual([
         { name: "test", command: "npm test", status: "failed" },

@@ -116,6 +116,16 @@ This is generic on purpose. The current public Codex CLI surface in this environ
 
 The shipped `config/capacity.json` is disabled by default. To enable it privately, create `config/capacity.local.json` and adjust the command and patterns to match the actual output you see on your machine.
 
+### Command security migration
+
+- Validation and capacity commands now support a safe structured form:
+  ```json
+  { "command": "npm", "args": ["test", "--", "--runInBand"] }
+  ```
+- Legacy string commands are still accepted for backward compatibility, but they are parsed and validated to reject shell metacharacters and injection-like syntax before execution.
+- `codex` invocations no longer receive `--dangerously-bypass-approvals-and-sandbox` by default. Set profile-level `codex.allowBypassApprovalsAndSandbox: true` to opt in.
+- Audit metadata records whether opt-in bypass is enabled on a run.
+
 Detailed setup instructions are in [docs/7d-capacity-guard.md](/Users/nishant/Documents/GitHub/Issue-Engine/docs/7d-capacity-guard.md).
 
 ## Commands

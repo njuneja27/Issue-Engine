@@ -1,6 +1,7 @@
 import type { AppConfig } from "./config.js";
 import type { Logger } from "./logging.js";
 import type { CommandRunner } from "./shell.js";
+import { commandToString, parseCommandInput } from "./command-config.js";
 
 export interface CapacityStatus {
   enabled: boolean;
@@ -39,7 +40,9 @@ export async function getCapacityStatus(
     };
   }
 
-  const result = await runner.run("sh", ["-lc", config.command], {
+  const command = parseCommandInput(config.command);
+
+  const result = await runner.run(command.command, command.args, {
     cwd: config.cwd ?? appConfig.paths.rootDir,
     allowFailure: true,
   });
@@ -49,7 +52,7 @@ export async function getCapacityStatus(
     if (config.failOpen ?? true) {
       return {
         enabled: true,
-        sourceCommand: config.command,
+        sourceCommand: commandToString(config.command),
         rawOutput: output,
         thresholdPercent: config.minRemainingPercent,
         shouldBlockNewWork: false,
@@ -60,7 +63,7 @@ export async function getCapacityStatus(
     }
 
     throw new Error(
-      `Capacity command failed with exit code ${result.exitCode}: ${output || config.command}`,
+      `Capacity command failed with exit code ${result.exitCode}: ${output || commandToString(config.command)}`,
     );
   }
 
@@ -74,7 +77,7 @@ export async function getCapacityStatus(
     if (config.failOpen ?? true) {
       return {
         enabled: true,
-        sourceCommand: config.command,
+        sourceCommand: commandToString(config.command),
         rawOutput: output,
         thresholdPercent: config.minRemainingPercent,
         shouldBlockNewWork: false,
@@ -85,7 +88,7 @@ export async function getCapacityStatus(
     }
 
     throw new Error(
-      `Could not parse remaining capacity from command output. Command: ${config.command}`,
+      `Could not parse remaining capacity from command output. Command: ${commandToString(config.command)}`,
     );
   }
 
@@ -95,7 +98,7 @@ export async function getCapacityStatus(
 
   return {
     enabled: true,
-    sourceCommand: config.command,
+    sourceCommand: commandToString(config.command),
     rawOutput: output,
     remainingPercent: parsed.remainingPercent,
     usedPercent: parsed.usedPercent,
