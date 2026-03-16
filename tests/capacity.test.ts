@@ -17,6 +17,30 @@ describe("capacity checks", () => {
     });
   });
 
+  test("prefers the requested window section when multiple limits are present", () => {
+    const output = `Session:
+019cf77d-4e8c-7ec1-8d29-1b119d86a91e
+Context:
+52% left (124,478 used / 258K)
+5h limit:
+██████████████████████░░░░░░░░░░░░░░░░░░░░░░░░░░
+45% left
+(resets 2:13 PM)
+7d limit:
+████████████████████████░░░░░░░░░░░░░░░░░░░░░░░░
+51% left
+(resets Mar 18)`;
+
+    expect(parseCapacityOutput(output, undefined, undefined, "7d")).toEqual({
+      remainingPercent: 51,
+      usedPercent: undefined,
+    });
+    expect(parseCapacityOutput(output, undefined, undefined, "5h")).toEqual({
+      remainingPercent: 45,
+      usedPercent: undefined,
+    });
+  });
+
   test("blocks new work when remaining percent is below threshold", async () => {
     const root = makeTempRoot("issue-engine-capacity-");
 
@@ -36,7 +60,12 @@ describe("capacity checks", () => {
           command: "sh",
           args,
           cwd: options?.cwd ?? process.cwd(),
-          stdout: "7d remaining: 4.2%",
+          stdout: `Context:
+52% left (124,478 used / 258K)
+5h limit:
+45% left
+7d limit:
+4.2% left`,
           stderr: "",
           exitCode: 0,
         }),

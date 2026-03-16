@@ -64,7 +64,12 @@ export async function getCapacityStatus(
     );
   }
 
-  const parsed = parseCapacityOutput(output, config.remainingPercentPatterns, config.usedPercentPatterns);
+  const parsed = parseCapacityOutput(
+    output,
+    config.remainingPercentPatterns,
+    config.usedPercentPatterns,
+    config.windowLabel,
+  );
   if (!parsed) {
     if (config.failOpen ?? true) {
       return {
@@ -133,16 +138,27 @@ export function parseCapacityOutput(
   output: string,
   remainingPatterns?: string[] | undefined,
   usedPatterns?: string[] | undefined,
+  preferredWindowLabel?: string | undefined,
 ): { remainingPercent: number; usedPercent?: number | undefined } | undefined {
-  const remaining = findPercent(output, remainingPatterns ?? defaultRemainingPatterns, "remaining");
+  const scopedOutput = preferredWindowLabel
+    ? extractWindowSection(output, preferredWindowLabel) ?? output
+    : output;
+
+  const remaining = findPercent(
+    scopedOutput,
+    remainingPatterns ?? defaultRemainingPatterns,
+    "remaining",
+  );
   if (remaining !== undefined) {
     return {
       remainingPercent: remaining,
-      usedPercent: output ? findPercent(output, usedPatterns ?? defaultUsedPatterns, "used") : undefined,
+      usedPercent: scopedOutput
+        ? findPercent(scopedOutput, usedPatterns ?? defaultUsedPatterns, "used")
+        : undefined,
     };
   }
 
-  const used = findPercent(output, usedPatterns ?? defaultUsedPatterns, "used");
+  const used = findPercent(scopedOutput, usedPatterns ?? defaultUsedPatterns, "used");
   if (used !== undefined) {
     return {
       remainingPercent: Number((100 - used).toFixed(2)),
@@ -151,6 +167,22 @@ export function parseCapacityOutput(
   }
 
   return undefined;
+}
+
+function extractWindowSection(output: string, windowLabel: string): string | undefined {
+  const escaped = escapeRegExp(windowLabel);
+  const headerPattern = new RegExp(`^\\s*${escaped}\\s+limit:\\s*$`, "im");
+  const headerMatch = headerPattern.exec(output);
+  if (!headerMatch || headerMatch.index === undefined) {
+    return undefined;
+  }
+
+  const start = headerMatch.index + headerMatch[0].length;
+  const remainder = output.slice(start);
+  const nextHeaderMatch = /^\s*[A-Za-z0-9][^\n]*limit:\s*$/im.exec(remainder);
+  return nextHeaderMatch
+    ? remainder.slice(0, nextHeaderMatch.index).trim()
+    : remainder.trim();
 }
 
 function findPercent(
@@ -178,4 +210,8 @@ function findPercent(
   }
 
   return undefined;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
